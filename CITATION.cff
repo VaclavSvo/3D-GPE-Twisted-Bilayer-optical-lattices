@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below, and the experiment it models."
+title: "twisted-bilayer: Gross-Pitaevskii simulations of a Bose-Einstein condensate in twisted-bilayer optical lattices"
+type: software
+authors:
+  - family-names: Svoboda
+    given-names: Václav
+license: MIT
+repository-code: "https://github.com/VaclavSvo/3D-GPE-Twisted-Bilayer-optical-lattices"
+version: 0.1.0
+keywords:
+  - Bose-Einstein condensate
+  - Gross-Pitaevskii equation
+  - PyTorch
+  - moire
+  - optical lattice
+references:
+  - type: article
+    title: "Atomic Bose-Einstein condensate in twisted-bilayer optical lattices"
+    authors:
+      - family-names: Meng
+        given-names: Zengming
+      - name: "et al."
+    journal: Nature
+    volume: 615
+    start: 231
+    year: 2023
+    doi: 10.1038/s41586-023-05695-4

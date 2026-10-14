@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "twisted-bilayer"
+version = "0.1.0"
+description = "Two-component Gross-Pitaevskii simulations of a Bose-Einstein condensate in twisted-bilayer optical lattices, in PyTorch"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Václav Svoboda" }]
+requires-python = ">=3.10"
+keywords = ["Bose-Einstein condensate", "Gross-Pitaevskii", "moire", "optical lattice", "PyTorch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+dependencies = [
+    "numpy>=2.0",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "torch>=2.1",
+    "threadpoolctl>=3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.6,<1"]
+
+[project.scripts]
+twisted-bilayer = "twisted_bilayer.cli:main"
+
+[project.urls]
+Repository = "https://github.com/VaclavSvo/3D-GPE-Twisted-Bilayer-optical-lattices"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not slow' --import-mode=importlib"
+markers = ["slow: full gate suites on the real engine (minutes); run with -m slow"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = ["src/twisted_bilayer/config.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "NPY"]
+ignore = [
+    "E501",  # line length is the formatter's job; long strings and comments stay
+    "E741",  # l, I, O as names: physics notation (I = current, ...)
+    "E731",  # small lambdas for transfer functions
+    "B905",  # zip() without strict=
+]
+
+[tool.ruff.lint.per-file-ignores]
+# the device / thread count must be fixed before torch and the engine are imported
+"tests/conftest.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["twisted_bilayer"]
