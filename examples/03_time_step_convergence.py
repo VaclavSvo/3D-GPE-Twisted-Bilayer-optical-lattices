@@ -70,10 +70,10 @@ dts = T / steps
 fig, ax = plt.subplots(figsize=(5.2, 3.6), constrained_layout=True)
 for order, mark in ((2, "o-"), (4, "s-")):
     ax.loglog(dts, errors[order], mark, label=f"order {order}")
-    ax.loglog(dts, errors[order][0] * (dts / dts[0]) ** order, ":", color="0.5")
+    ax.loglog(dts, 0.2 * errors[order][0] * (dts / dts[0]) ** order, ":", color="0.4")  # offset guide
 ax.set_xlabel(r"time step $dt$ ($\hbar/E_R$)")
 ax.set_ylabel(r"$\|\psi - \psi_\mathrm{ref}\| / \|\psi_\mathrm{ref}\|$")
-ax.set_title(r"split-step error at $t = \hbar/E_R$ (dotted: $dt^2$, $dt^4$)", fontsize=9)
+ax.set_title(r"split-step error at $t = \hbar/E_R$ (dotted guides: $dt^2$, $dt^4$)", fontsize=9)
 ax.legend(frameon=False)
 fig.savefig(OUT / "03_time_step_convergence.png", dpi=150)
 print(f"wrote {OUT / '03_time_step_convergence.png'}")

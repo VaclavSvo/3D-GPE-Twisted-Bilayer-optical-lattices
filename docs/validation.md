@@ -2,7 +2,7 @@
 
 **89 of 89 physics gates pass** on CPU (2 threads), torch 2.14.1+cu130 (full settings, 383 s).
 
-A gate is a pass/fail check of the engine against something known independently: an analytic result, an exact identity of the Hamiltonian, or a number reproduced by an independent code. Thresholds and their sources are in `src/twisted_bilayer/gates/references.py`; a threshold is never loosened to make a gate pass. Regenerate this page with
+A gate is a pass/fail check of the engine against something known independently: an analytic result, an exact identity of the Hamiltonian, or a number reproduced by a separately written code. Thresholds and their sources are in `src/twisted_bilayer/gates/references.py`; a threshold is never loosened to make a gate pass. Regenerate this page with
 
 ```bash
 twisted-bilayer gates --full --trapped --out outputs/gates
@@ -93,7 +93,7 @@ Gauge symmetry H(-J) = sz H(J) sz, conservation of N2/N without coupling, C4 iso
 
 ## C. Numerical anchors
 
-Dressed band bottom, chemical potential and in-situ contrast at the experiment's coupling, each reproduced by an independent solver.
+Dressed band bottom, chemical potential and in-situ contrast at the experiment's coupling, each reproduced by the author's earlier, separately written solvers (not distributed).
 
 | gate | result | |
 | --- | --- | --- |
@@ -130,7 +130,7 @@ Kinetic phase per time step of the automatic time step (orders 2 and 4), grid re
 
 ## E. Trapped cloud
 
-A cloud of N = 2000 atoms in a 20 Hz trap: contrasts and size against an independent solver, convergence, conservation, and the cloud staying inside the box.
+A cloud of N = 2000 atoms in a 20 Hz trap: contrasts and size against the author's earlier quasi-2D solver (not distributed), convergence, conservation, and the cloud staying inside the box.
 
 | gate | result | |
 | --- | --- | --- |

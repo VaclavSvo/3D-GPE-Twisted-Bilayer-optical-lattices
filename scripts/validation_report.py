@@ -27,7 +27,7 @@ GROUPS = {
     "C": (
         "Numerical anchors",
         "Dressed band bottom, chemical potential and in-situ contrast at the experiment's coupling, each "
-        "reproduced by an independent solver.",
+        "reproduced by the author's earlier, separately written solvers (not distributed).",
     ),
     "D": (
         "Pre-flight checks",
@@ -36,7 +36,8 @@ GROUPS = {
     ),
     "E": (
         "Trapped cloud",
-        "A cloud of N = 2000 atoms in a 20 Hz trap: contrasts and size against an independent solver, "
+        "A cloud of N = 2000 atoms in a 20 Hz trap: contrasts and size against the author's earlier "
+        "quasi-2D solver (not distributed), "
         "convergence, conservation, and the cloud staying inside the box.",
     ),
 }
@@ -62,7 +63,7 @@ def main(path: str, out: str = str(ROOT / "docs" / "validation.md")) -> int:
         f"({'full' if not meta.get('quick', True) else 'quick'} settings, {d.get('elapsed_s', 0):.0f} s).",
         "",
         "A gate is a pass/fail check of the engine against something known independently: an analytic "
-        "result, an exact identity of the Hamiltonian, or a number reproduced by an independent code. "
+        "result, an exact identity of the Hamiltonian, or a number reproduced by a separately written code. "
         "Thresholds and their sources are in `src/twisted_bilayer/gates/references.py`; a threshold is "
         "never loosened to make a gate pass. Regenerate this page with",
         "",

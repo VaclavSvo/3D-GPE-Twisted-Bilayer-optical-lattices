@@ -20,7 +20,7 @@ import os
 
 import torch
 
-_FORCE_CPU = bool(os.environ.get("TWISTED_BILAYER_FORCE_CPU"))
+_FORCE_CPU = os.environ.get("TWISTED_BILAYER_FORCE_CPU", "").strip().lower() not in ("", "0", "false", "no")
 HAS_GPU = torch.cuda.is_available() and not _FORCE_CPU
 DEVICE = torch.device("cuda" if HAS_GPU else "cpu")
 
