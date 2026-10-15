@@ -5,6 +5,7 @@
     twisted-bilayer run trapped --out runs          ... in runs/trapped/
     twisted-bilayer run my_row --scenarios rows.py  a row of your own scenario file
     twisted-bilayer run bdg --cpu                   stay on the CPU when a GPU is present
+    twisted-bilayer run gpu_3d_vs_2d --128          complex128 throughout (publication runs)
     twisted-bilayer gates [--full] [--trapped]      the physics gates (see twisted_bilayer.gates)
 
 The engine picks its device when it is imported, so this module imports it only after the command line
@@ -43,7 +44,7 @@ def _cmd_run(a) -> int:
         os.environ[FORCE_CPU] = "1"
     from twisted_bilayer.runners import run_scenario
 
-    run_scenario(a.name, row, out_root=a.out)
+    run_scenario(a.name, row, out_root=a.out, double=a.double)
     return 0
 
 
@@ -76,6 +77,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", default="results", help="output folder; files go to OUT/NAME/ (default: results)")
     p.add_argument("--scenarios", metavar="FILE", help="a Python file with your own SCENARIOS dict")
     p.add_argument("--cpu", action="store_true", help="stay on the CPU even when a GPU is present")
+    p.add_argument(
+        "--128",
+        dest="double",
+        action="store_true",
+        help="run in complex128 throughout (publication figures); without it a row runs in the precision it names",
+    )
     p.set_defaults(fn=_cmd_run)
     sub.add_parser("gates", help="run the physics gates")
     a = ap.parse_args(argv)

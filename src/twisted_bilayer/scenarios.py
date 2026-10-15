@@ -60,6 +60,29 @@ TRAPPED_DEFAULTS = dict(
     seed=0,
     tol=2e-10,
     s_sat=S_SAT,
+    dtype="complex128",
+)
+
+# Defaults of the full-3D comparison (engine.trapped3d): the trapped cloud above, given at box_cells = 3 and
+# scaled to the box at fixed peak density; sizes "auto" fill the device (85 % of the free GPU memory).
+#
+# Precision. 3D solves run in complex64 by default: on the experiment's cloud (box 3, N_z = 48) every
+# observable of `gpu_precision` agrees with complex128 to < 2 % of the 3D - NPSE difference (mu to 1e-7 E_R,
+# contrasts to 4e-6), 16x faster on a GTX 1660 Ti, in half the memory. 2D solves are cheap (0.1 GiB and
+# half a minute for the experiment's cloud) and stay in complex128, as do superfluid fractions (energy
+# differences ~1e-3 E_R on ~80 E_R) and real-time runs. `--128` runs complex128 throughout.
+TRAPPED_3D_DEFAULTS = dict(
+    {k: v for k, v in TRAPPED_DEFAULTS.items() if k not in ("kind", "box_cells", "vertical", "g2d")},
+    cell_points=176,
+    tol=1e-9,
+    z_extent_lz=5.0,
+    dtype="complex64",  # the 3D solve
+    dtype_2d="complex128",  # the two quasi-2D solves
+    box_cells="auto",
+    Nz="auto",
+    Nz_min=24,
+    Nz_max=128,
+    memory_fraction=0.85,
 )
 
 SCENARIOS = {
@@ -147,9 +170,43 @@ SCENARIOS = {
     ),
     # a trapped cloud of N = 2000 atoms in a 20 Hz trap, 3 x 3 supercells at 8 points per a (~6 min on 2 CPU cores)
     "trapped": dict(TRAPPED_DEFAULTS, cell_points=176),
+    # the trapped cloud in full 3D against the NPSE and fixed-g quasi-2D models on the small m = 4 cell (~20 s)
+    "trapped_3d_quick": dict(
+        TRAPPED_3D_DEFAULTS,
+        kind="trapped_3d",
+        N_atoms=60.0,
+        nu_r_hz=200.0,
+        cell_points=32,
+        m=4,
+        n=1,
+        fillings=(0.5, 1.0, 2.0, 3.0),
+        box_cells=3,
+        Nz=16,
+    ),
     # ── GPU ──
     # the quick scan on the GPU and in a CPU subprocess, every number compared; then a production timing
     "gpu_check": dict(kind="gpu_check", time_production=True),
+    # the trapped cloud in full 3D and in the two quasi-2D models, as large as the GPU holds (3D in complex64,
+    # 2D in complex128; --128 for complex128 throughout, about half the 3D points)
+    "gpu_3d_vs_2d": dict(TRAPPED_3D_DEFAULTS, kind="trapped_3d"),
+    # the same comparison in complex128 and complex64, sized to take about `minutes` on the GPU
+    "gpu_precision": dict(TRAPPED_3D_DEFAULTS, kind="trapped_3d_precision", minutes=10.0),
+    # convergence in the vertical resolution: the 3 x 3 cloud in 3D at N_z = 16 ... 96 over the same z box
+    # (dz = 0.62 ... 0.10 l_z), against the finest; N_z that do not fit the GPU are skipped (~10 min, 6 GB)
+    "gpu_3d_nz": dict(TRAPPED_3D_DEFAULTS, kind="trapped_3d_nz", box_cells=3, Nz_list=(16, 24, 32, 48, 64, 96)),
+    # the same on the small m = 4 cloud (~1 min on a CPU)
+    "trapped_3d_nz_quick": dict(
+        TRAPPED_3D_DEFAULTS,
+        kind="trapped_3d_nz",
+        N_atoms=60.0,
+        nu_r_hz=200.0,
+        cell_points=32,
+        m=4,
+        n=1,
+        fillings=(0.5, 1.0, 2.0, 3.0),
+        box_cells=3,
+        Nz_list=(8, 12, 16, 24, 32),
+    ),
 }
 
 

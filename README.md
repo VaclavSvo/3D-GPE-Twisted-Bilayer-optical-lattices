@@ -192,11 +192,16 @@ your own file with `--scenarios FILE`. Times are for 2 CPU cores.
 | `rabi_quick` | real-time Rabi transfer between the two states inside the lattice | 15 s |
 | `toy1d` | the one-dimensional two-lattice model: exact hopping, superfluid fraction by twist | 10 s |
 | `thin_z_quick` | the full 3D problem with a thin vertical direction against the quasi-2D reduction | 20 s |
+| `trapped_3d_quick` | a small trapped cloud in full 3D against the NPSE and fixed-g quasi-2D models | 20 s |
+| `trapped_3d_nz_quick` | convergence of that 3D cloud in the vertical resolution (N_z = 8 … 32) | 45 s |
 | `bdg` | Bogoliubov–de Gennes modes: sound speed and the spin branch (always on the CPU) | 1.5 min |
 | `tight_binding` | the two-layer Bose–Hubbard mean field on the experiment's supercell, three variants (always on the CPU) | 1.5 min |
 | `coupling_scan_v4` | coupling scan at V₀ = 4 E_R on the experiment's supercell (θ = 5.2°) | 6 min |
 | `trapped` | a cloud of N = 2000 atoms in a 20 Hz trap on 3 × 3 supercells, and its contrast as imaged | 6 min |
 | `gpu_check` | the quick scan on the GPU and on the CPU, every number compared; then a production timing | GPU |
+| `gpu_3d_vs_2d` | the trapped cloud in full 3D and in both quasi-2D models, as large as the GPU holds | GPU |
+| `gpu_precision` | the same comparison in complex128 and complex64, sized to take about 10 minutes | GPU, 10 min |
+| `gpu_3d_nz` | the experiment's cloud in 3D at N_z = 16 … 96 over the same z box, against the finest | GPU, ~10 min |
 
 ## How it works, in one paragraph
 
@@ -216,8 +221,8 @@ mean-field stage. The modules and their equations are documented in their docstr
 ```
 src/twisted_bilayer/
   engine/        the solver: physics.py (BilayerGPE), ground_state.py, evolve.py, grid.py, lattice.py,
-                 npse.py, observables.py, imaging.py, sweep.py, trapped.py, thin_z.py, bdg.py, bands.py,
-                 lattice_model.py, units.py, backend.py
+                 npse.py, observables.py, imaging.py, sweep.py, trapped.py, trapped3d.py, thin_z.py, bdg.py,
+                 bands.py, lattice_model.py, units.py, backend.py
   tof/           time of flight and absorption imaging
   gates/         physics gates: core.py, references.py (every reference number), suite.py
   config.py      the experiment's physical inputs
@@ -228,7 +233,7 @@ src/twisted_bilayer/
 examples/        runnable examples
 tests/           pytest; CPU only, two threads
 scripts/         validation_report.py (writes docs/validation.md), readme_figures.py
-docs/            validation.md and the README figures
+docs/            validation.md, the README figures, roadmap-beyond-mean-field.md (the lattice-model plan)
 check.py         lint + tests in one command
 ```
 
@@ -243,10 +248,43 @@ Start with `twisted-bilayer run gpu_check`. It runs the quick scan on both devic
 number (10⁻⁶ on energies, 10⁻⁴ on superfluid fractions) before it times a production-size cell. On a
 12 GB consumer NVIDIA GPU, `coupling_scan_quick` reproduces the CPU table above to every printed digit.
 Supercell ground states run in complex128. Large grids can relax in complex64 and polish in complex128.
+Each scenario row names its precision; `twisted-bilayer run NAME --128` overrides it with complex128
+throughout, for publication figures (see below for what single precision costs).
+
+### Full 3D against quasi-2D, sized to the GPU
+
+`gpu_3d_vs_2d` solves the trapped cloud three ways on the same (x, y) grid: in full 3D (the vertical trap on
+a z grid), with the NPSE, and with the fixed g₂D. It then compares μ, the column density, the local vertical
+width and the contrasts as imaged. The cloud of the `trapped` row (N = 2000, 20 Hz on 3 × 3 supercells) is
+scaled to the box at fixed peak density (ν_r ∝ 1/box, N ∝ box²), so a larger box holds more moiré cells
+with the same local physics. Before the run, a short probe measures the memory and time per step of the 3D
+solve on this GPU. The run then takes the largest odd box that fits in 85 % of the free memory at N_z ≥ 24,
+and spends the rest on N_z. The same command fills a 6, 12 or 24 GB card. To pin the size instead, set
+`box_cells` and `Nz` in a row of your own.
+
+`gpu_precision` runs the same comparison in complex128 and complex64. It is sized to take about 10 minutes
+in all (the `minutes` key) and reports, for every observable, the single-precision error against the
+3D − NPSE difference it has to resolve. On the experiment's cloud (3 × 3 supercells, 13.4 million 3D
+points, GTX 1660 Ti) every complex64 error is below 2 % of that difference (μ to 10⁻⁷ E_R, contrasts to
+4 × 10⁻⁶), and the 3D solve is 16 times faster in half the memory. The 3D solves therefore run in
+complex64 by default; pass `--128` for complex128 throughout. 2D runs are cheap (the experiment's cloud
+takes 0.1 GiB and half a minute) and stay in complex128, as do superfluid fractions and real-time runs.
+
+`gpu_3d_nz` checks the vertical resolution: the same cloud at N_z = 16 … 96 over ±5 l_z, each against
+the finest, with the 3D − NPSE difference for scale. On the small cloud (`trapped_3d_nz_quick`) the
+convergence is spectral: N_z = 16 (dz = 0.62 l_z) is within 10⁻⁵ of N_z = 32 in every observable.
+
+```bash
+twisted-bilayer run gpu_precision    # ~10 min
+twisted-bilayer run gpu_3d_nz        # vertical resolution
+twisted-bilayer run gpu_3d_vs_2d     # the largest cloud this GPU holds
+```
 
 ## Limitations
 
-- Mean field only. Quantum depletion and finite temperature are not included, beyond the Bogoliubov modes.
+- Mean field only. Quantum depletion and finite temperature are not included, beyond the Bogoliubov modes
+  and the single-site Gutzwiller of the lattice model; [the roadmap](docs/roadmap-beyond-mean-field.md)
+  plans cluster Gutzwiller, exact diagonalisation and quantum Monte Carlo.
 - One s-wave scattering length for all three channels (SU(2)-symmetric interaction), as in the paper.
 - Commensurate twist angles only (tan(θ/2) = n/m). The measured angle 5.21(5)° is represented by 1/22.
 - The shipped 3D scenario (`thin_z_quick`) uses the small tan(θ/2) = 1/4 cell. Full 3D runs on the

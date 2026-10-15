@@ -55,8 +55,10 @@ def _memory_note(numel: int, batch: int, components: int, dtype: str) -> str:
     # the solver keeps ~6 fields alive at the polish peak (psi, v, psi_best, H psi, work)
     gib = 6 * field / 2**30
     note = f"~{gib:.2f} GiB at the solver's peak (estimate; one field = {field / 2**20:.0f} MiB)"
-    if gib > 9.0:
-        note += "  <-- WARNING: near the memory of a 12 GB GPU; split the Omega_R list"
+    if torch.cuda.is_available():
+        total = torch.cuda.get_device_properties(0).total_memory / 2**30
+        if gib > 0.75 * total:
+            note += f"  <-- WARNING: near the {total:.0f} GiB of this GPU; split the batch"
     return note
 
 
@@ -560,7 +562,7 @@ def run_trapped(name: str, row: dict) -> None:
         f"supercell m = {spec.m}: {spec.cell_points}^2 per cell (dx = {geo.L_box / spec.cell_points:.4f} a); "
         f"box {spec.box_cells}x{spec.box_cells} cells = {grid.N[0]}^2, L = {grid.L[0]:.3f} a"
     )
-    print("trapped grid: " + _memory_note(grid.N[0] * grid.N[1], 1, 2, "complex128"))
+    print("trapped grid: " + _memory_note(grid.N[0] * grid.N[1], 1, 2, spec.dtype))
     print(
         f"N = {spec.N_atoms:g}, omega_r = 2 pi x {spec.nu_r_hz:g} Hz = {spec.omega_r():.6f} E_R, Omega_R = "
         f"{spec.Omega_R:.6f} E_R, vertical = {spec.vertical}, g2D = {spec.couplings()[0]:.7f} E_R a^2"
@@ -676,12 +678,322 @@ def run_gpu_check(name: str, row: dict) -> None:
         f"  {dt:.1f} s for 4 couplings x 3 relaxations; peak GPU memory {peak:.2f} GiB; "
         f"residual max {float(np.max(res.columns['residual_0'])):.1e}"
     )
+    total = torch.cuda.get_device_properties(0).total_memory / 2**30
     print(
-        f"  => a 10-coupling sweep ~ {dt * 10 / 4:.0f} s; a 12 GB GPU holds "
-        f"~{int(9.0 / max(peak, 1e-3) * 4)} couplings per batch"
+        f"  => a 10-coupling sweep ~ {dt * 10 / 4:.0f} s; this {total:.0f} GiB GPU holds "
+        f"~{int(0.75 * total / max(peak, 1e-3) * 4)} couplings per batch"
     )
     with open(os.path.join(out, "timing.json"), "w") as f:
         json.dump(dict(seconds=dt, peak_gib=peak, device=describe_device(), timing=res.timing), f, indent=2)
+
+
+# ── full 3D against quasi-2D, sized to the device ─────────────────────────────
+
+
+def _trapped3d_row(row: dict):
+    """The TrappedSpec of a row (its cloud given at box_cells = 3), the Vertical, and the sizing keys."""
+    import dataclasses
+
+    from twisted_bilayer.engine import trapped as TR
+    from twisted_bilayer.engine import trapped3d as T3
+
+    spec_keys = {f.name for f in dataclasses.fields(TR.TrappedSpec)} - {"box_cells", "dtype", "vertical"}
+    spec = TR.TrappedSpec(**{k: v for k, v in row.items() if k in spec_keys})
+    vert = T3.Vertical(z_extent_lz=row.get("z_extent_lz", 5.0), polish_steps=row.get("polish_steps_3d", 20000))
+    size = dict(
+        box_cells=row.get("box_cells", "auto"),
+        Nz=row.get("Nz", "auto"),
+        Nz_min=row.get("Nz_min", 24),
+        Nz_max=row.get("Nz_max", 128),
+        cpu_box_cells=row.get("cpu_box_cells", 1),
+        cpu_Nz=row.get("cpu_Nz", 24),
+    )
+    return spec, vert, size
+
+
+def _fixed(size: dict) -> tuple[int | None, int | None]:
+    b, z = size["box_cells"], size["Nz"]
+    return (None if b == "auto" else int(b)), (None if z == "auto" else int(z))
+
+
+def _cpu_size(size: dict) -> tuple[int, int]:
+    b, z = _fixed(size)
+    b = size["cpu_box_cells"] if b is None else b
+    z = size["cpu_Nz"] if z is None else z
+    print(f"no GPU: automatic sizing needs one; running box {b}, N_z = {z} (cpu_box_cells / cpu_Nz of the row)")
+    return b, z
+
+
+def _write_3d_outputs(out: str, tag: str, res: dict, obs: dict, cmp: dict, title: str) -> None:
+    from twisted_bilayer.engine import trapped3d as T3
+
+    os.makedirs(os.path.join(out, "fields"), exist_ok=True)
+    T3.save_fields(res, os.path.join(out, "fields", f"columns_{tag}.npz"))
+    T3.plot_comparison(res, os.path.join(out, f"comparison_{tag}.png"), title=title)
+
+
+def run_trapped_3d(name: str, row: dict) -> None:
+    """The trapped cloud in full 3D and in the two quasi-2D models (engine.trapped3d), as large as the
+    device holds: the largest odd box_cells at N_z >= Nz_min within memory_fraction of the free GPU
+    memory, then the largest N_z. box_cells / Nz as numbers pin the size."""
+    from twisted_bilayer.engine import trapped3d as T3
+    from twisted_bilayer.engine.backend import HAS_GPU
+
+    spec0, vert, size = _trapped3d_row(row)
+    dtype = row.get("dtype", "complex128")
+    dtype_2d = row.get("dtype_2d", dtype)
+    cp = spec0.cell_points
+    _section("pre-flight")
+    print(describe_device())
+    plan_info = {}
+    box, Nz = _fixed(size)
+    if box is None or Nz is None:
+        if not HAS_GPU:
+            box, Nz = _cpu_size(size)
+        else:
+            pr = T3.probe(spec0, vert, dtype)
+            budget = T3.memory_budget(row.get("memory_fraction", 0.85))
+            mem = pr["memory"]
+            p = T3.plan(
+                lambda b, z: mem(T3.points_3d(b, z, cp)),
+                budget,
+                cp,
+                size["Nz_min"],
+                size["Nz_max"],
+                box_fixed=box,
+                Nz_fixed=Nz,
+            )
+            if p is None:
+                raise SystemExit(f"box 1 at N_z = {size['Nz_min']} does not fit in {budget / 2**30:.2f} GiB")
+            box, Nz = p
+            pts = T3.points_3d(box, Nz, cp)
+            plan_info = dict(
+                budget_gib=budget / 2**30,
+                bytes_per_point=mem.b,
+                predicted_peak_gib=mem(pts) / 2**30,
+                step_seconds=pr["step_seconds"](pts),
+                predicted_seconds=T3.predicted_seconds(pr["step_seconds"], box, Nz, cp),
+            )
+            print(
+                f"probe ({dtype}): {mem.b:.0f} bytes per 3D point at the polish peak, "
+                f"{pr['step_seconds'].b * 1e9:.1f} ns per point per step; budget {plan_info['budget_gib']:.2f} GiB"
+            )
+            print(
+                f"plan: peak ~{plan_info['predicted_peak_gib']:.2f} GiB, {plan_info['step_seconds']:.3f} s per 3D step, "
+                f"~{plan_info['predicted_seconds'] / 60:.0f} min in all (from {T3.STEPS_3D} 3D and 2 x {T3.STEPS_2D} 2D "
+                "polish steps; the real count depends on the cloud)"
+            )
+    spec = T3.scaled(spec0, box)
+    vert.Nz = int(Nz)
+    print(T3.describe_plan(spec, vert) + f", 3D in {dtype}, 2D in {dtype_2d}")
+    _section("run")
+    res = T3.solve_models(spec, vert, dtype, verbose=VERBOSE, dtype_2d=dtype_2d)
+    obs = T3.model_observables(res, s_sat=row.get("s_sat", 0.01))
+    cmp = T3.compare_models(res, obs)
+    out = _outdir(name)
+    report = T3.report_models(obs, cmp)
+    head = T3.describe_plan(spec, vert) + f", 3D in {dtype}, 2D in {dtype_2d}"
+    if HAS_GPU and obs["3d"]["peak_gib"] is not None:
+        total = torch.cuda.get_device_properties(0).total_memory / 2**30
+        head += f"\n3D solve peak memory {obs['3d']['peak_gib']:.2f} GiB of {total:.1f} GiB"
+    with open(os.path.join(out, "summary.json"), "w") as f:
+        json.dump(
+            dict(
+                spec=dataclasses_asdict(spec),
+                Nz=vert.Nz,
+                z_extent_lz=vert.z_extent_lz,
+                dtype=dtype,
+                dtype_2d=dtype_2d,
+                plan=plan_info,
+                observables=obs,
+                comparison=cmp,
+                g3d=res["g3d"],
+                omega_z=res["omega_z"],
+                l_z=res["l_z"],
+            ),
+            f,
+            indent=1,
+            default=float,
+        )
+    with open(os.path.join(out, "report.txt"), "w") as f:
+        f.write(head + "\n" + report + "\n")
+    _write_3d_outputs(out, dtype, res, obs, cmp, head.splitlines()[0])
+    _section("result")
+    print(head)
+    print(report)
+    print(f"wrote {out}/summary.json, report.txt, comparison_{dtype}.png, fields/columns_{dtype}.npz")
+
+
+def run_trapped_3d_precision(name: str, row: dict) -> None:
+    """The same comparison in complex128 and complex64, sized so that both together take about
+    `minutes` on the device: is single precision good enough to resolve the 3D - 2D difference?"""
+    from twisted_bilayer.engine import trapped as TR
+    from twisted_bilayer.engine import trapped3d as T3
+    from twisted_bilayer.engine.backend import HAS_GPU
+
+    spec0, vert, size = _trapped3d_row(row)
+    minutes = float(row.get("minutes", 10.0))
+    dtypes = ("complex128", "complex64")
+    cp = spec0.cell_points
+    _section("pre-flight")
+    print(describe_device())
+    plan_info = {}
+    box, Nz = _fixed(size)
+    if box is None or Nz is None:
+        if not HAS_GPU:
+            box, Nz = _cpu_size(size)
+        else:
+            prs = {d: T3.probe(spec0, vert, d) for d in dtypes}
+            budget = T3.memory_budget(row.get("memory_fraction", 0.85))
+            mem = prs["complex128"]["memory"]
+
+            def cost(b, z):
+                if mem(T3.points_3d(b, z, cp)) > budget:
+                    return math.inf
+                return sum(T3.predicted_seconds(prs[d]["step_seconds"], b, z, cp) for d in dtypes)
+
+            target = 0.9 * 60.0 * minutes  # the supercell scan and the I/O take the rest
+            p = T3.plan(cost, target, cp, size["Nz_min"], size["Nz_max"], box_fixed=box, Nz_fixed=Nz)
+            if p is None:
+                p = (box or 1, Nz or size["Nz_min"])
+                print(f"even box {p[0]} at N_z = {p[1]} is predicted above {minutes:g} min; running it anyway")
+            box, Nz = p
+            plan_info = dict(
+                minutes=minutes,
+                predicted_seconds=cost(box, Nz),
+                step_seconds={d: prs[d]["step_seconds"](T3.points_3d(box, Nz, cp)) for d in dtypes},
+            )
+            print(
+                f"plan: ~{plan_info['predicted_seconds'] / 60:.1f} min predicted; 3D step "
+                + ", ".join(f"{d} {s:.3f} s" for d, s in plan_info["step_seconds"].items())
+            )
+    spec = T3.scaled(spec0, box)
+    vert.Nz = int(Nz)
+    print(T3.describe_plan(spec, vert))
+    _section("run")
+    t0 = time.time()
+    scan = TR.supercell_scan(spec, verbose=VERBOSE)
+    runs = {}
+    for d in dtypes:
+        print(f"\n{d}:", flush=True)
+        res = T3.solve_models(spec, vert, d, scan=scan, verbose=VERBOSE)
+        obs = T3.model_observables(res, s_sat=row.get("s_sat", 0.01))
+        runs[d] = (res, obs, T3.compare_models(res, obs))
+    elapsed = time.time() - t0
+    (r128, o128, c128), (r64, o64, c64) = runs["complex128"], runs["complex64"]
+    table, numbers = T3.precision_table(o64, o128, c128)
+    dA = r128["grid2"].dx[0] * r128["grid2"].dx[1]
+    dens = {m: T3.density_deviation(r64["models"][m]["n"], r128["models"][m]["n"], dA) for m in T3.MODELS}
+    lines = [
+        T3.describe_plan(spec, vert),
+        f"wall time {elapsed / 60:.1f} min (target {minutes:g} min)",
+        "",
+        "complex128:",
+        T3.report_models(o128, c128),
+        "",
+        "complex64:",
+        T3.report_models(o64, c64),
+        "",
+        "complex64 against complex128 (the 3D - NPSE gap from complex128):",
+        table,
+        "  column density, complex64 vs complex128: "
+        + "; ".join(f"{m} max {v['max_rel']:.1e}, int {v['l1_rel']:.1e}" for m, v in dens.items()),
+    ]
+    out = _outdir(name)
+    with open(os.path.join(out, "summary.json"), "w") as f:
+        json.dump(
+            dict(
+                spec=dataclasses_asdict(spec),
+                Nz=vert.Nz,
+                z_extent_lz=vert.z_extent_lz,
+                plan=plan_info,
+                elapsed_seconds=elapsed,
+                observables={d: runs[d][1] for d in dtypes},
+                comparison={d: runs[d][2] for d in dtypes},
+                precision=numbers,
+                density_precision=dens,
+            ),
+            f,
+            indent=1,
+            default=float,
+        )
+    with open(os.path.join(out, "report.txt"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+    for d in dtypes:
+        _write_3d_outputs(out, d, runs[d][0], runs[d][1], runs[d][2], f"{T3.describe_plan(spec, vert)}, {d}")
+    _section("result")
+    print("\n".join(lines))
+    print(f"wrote {out}/summary.json, report.txt, comparison_<dtype>.png, fields/columns_<dtype>.npz")
+
+
+def run_trapped_3d_nz(name: str, row: dict) -> None:
+    """The 3D cloud at several N_z over the same z box (engine.trapped3d.nz_convergence): is the vertical
+    resolution converged, and is its error small against the 3D - NPSE difference? On a GPU, N_z values
+    whose 3D solve would not fit in memory_fraction of the free memory are skipped."""
+    from twisted_bilayer.engine import trapped3d as T3
+    from twisted_bilayer.engine.backend import HAS_GPU
+
+    spec0, vert, size = _trapped3d_row(row)
+    box = int(row.get("box_cells", 3))
+    spec = T3.scaled(spec0, box)
+    dtype = row.get("dtype", "complex64")
+    dtype_2d = row.get("dtype_2d", "complex128")
+    Nz_list = sorted(int(n) for n in row["Nz_list"])
+    _section("pre-flight")
+    print(describe_device())
+    if HAS_GPU:
+        pr = T3.probe(spec0, vert, dtype)
+        budget = T3.memory_budget(row.get("memory_fraction", 0.85))
+        fits = [n for n in Nz_list if pr["memory"](T3.points_3d(box, n, spec.cell_points)) <= budget]
+        if len(fits) < len(Nz_list):
+            print(f"skipping N_z = {sorted(set(Nz_list) - set(fits))}: above {budget / 2**30:.2f} GiB")
+        Nz_list = fits
+        if len(Nz_list) < 2:
+            raise SystemExit("fewer than two N_z fit on this device; lower Nz_list or box_cells")
+        for n in Nz_list:
+            pts = T3.points_3d(box, n, spec.cell_points)
+            print(f"  N_z = {n}: ~{pr['memory'](pts) / 2**30:.2f} GiB, ~{pr['step_seconds'](pts):.3f} s per step")
+    vert.Nz = Nz_list[-1]
+    print(T3.describe_plan(spec, vert) + f" (finest); N_z = {Nz_list}; 3D in {dtype}, 2D in {dtype_2d}")
+    _section("run")
+    conv = T3.nz_convergence(
+        spec,
+        Nz_list,
+        z_extent_lz=vert.z_extent_lz,
+        dtype=dtype,
+        dtype_2d=dtype_2d,
+        polish_steps=vert.polish_steps,
+        verbose=VERBOSE,
+    )
+    report = T3.report_nz(conv)
+    out = _outdir(name)
+    with open(os.path.join(out, "summary.json"), "w") as f:
+        json.dump(
+            dict(
+                spec=dataclasses_asdict(conv["spec"]),
+                z_extent_lz=conv["z_extent_lz"],
+                dtype=dtype,
+                dtype_2d=dtype_2d,
+                npse=conv["npse"],
+                rows=[{k: v for k, v in r.items() if k != "numbers"} for r in conv["rows"]],
+            ),
+            f,
+            indent=1,
+            default=float,
+        )
+    head = T3.describe_plan(spec, vert) + f" (finest); 3D in {dtype}, 2D in {dtype_2d}"
+    with open(os.path.join(out, "report.txt"), "w") as f:
+        f.write(head + "\n" + report + "\n")
+    _section("result")
+    print(head)
+    print(report)
+    print(f"wrote {out}/summary.json, report.txt")
+
+
+def dataclasses_asdict(obj) -> dict:
+    import dataclasses
+
+    return dataclasses.asdict(obj)
 
 
 KINDS = {
@@ -693,6 +1005,9 @@ KINDS = {
     "bdg": run_bdg,
     "trapped": run_trapped,
     "gpu_check": run_gpu_check,
+    "trapped_3d": run_trapped_3d,
+    "trapped_3d_precision": run_trapped_3d_precision,
+    "trapped_3d_nz": run_trapped_3d_nz,
 }
 
 
@@ -725,13 +1040,42 @@ def _provenance() -> dict:
     )
 
 
-def run_scenario(name: str, row: dict, out_root: str = "results") -> None:
-    """Run one scenario row; files go to <out_root>/<name>/ (provenance.json included)."""
+# The precision keys of each kind. `twisted-bilayer run NAME --128` sets them all to complex128 (publication
+# runs); without it a row runs in the precision it names. Kinds not listed run in complex128 throughout,
+# and `trapped_3d_precision` runs both precisions by design.
+PRECISION_KEYS = {
+    "coupling_scan": ("dtype_relax", "dtype_polish"),
+    "thin_z": ("dtype_relax", "dtype_polish"),
+    "rabi": ("dtype",),
+    "trapped": ("dtype",),
+    "trapped_3d": ("dtype", "dtype_2d"),
+    "trapped_3d_nz": ("dtype", "dtype_2d"),
+}
+
+
+def double_precision(row: dict) -> dict:
+    """A copy of the row with every precision key of its kind set to complex128."""
+    row = dict(row)
+    for k in PRECISION_KEYS.get(row["kind"], ()):
+        row[k] = "complex128"
+    return row
+
+
+def run_scenario(name: str, row: dict, out_root: str = "results", double: bool = False) -> None:
+    """Run one scenario row; files go to <out_root>/<name>/ (provenance.json included). double=True
+    (`--128` on the command line) runs it in complex128 throughout."""
     global _OUT_ROOT
     _OUT_ROOT = out_root
     if row["kind"] not in KINDS:
         raise SystemExit(f"scenario {name!r}: unknown kind {row['kind']!r}; known kinds: {sorted(KINDS)}")
+    if double:
+        row = double_precision(row)
     print(f"scenario {name} ({row['kind']}) on {describe_device()}")
+    keys = PRECISION_KEYS.get(row["kind"], ())
+    if keys:
+        print(
+            "precision: " + ", ".join(f"{k} = {row.get(k, 'default')}" for k in keys) + (" (--128)" if double else "")
+        )
     t0 = time.time()
     KINDS[row["kind"]](name, row)
     out = _outdir(name)

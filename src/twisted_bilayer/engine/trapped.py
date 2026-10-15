@@ -30,7 +30,7 @@ from scipy.interpolate import PchipInterpolator
 from twisted_bilayer import parameters as _P
 
 from . import imaging, units
-from .backend import to_numpy
+from .backend import REAL_OF, complex_dtype, to_numpy
 from .grid import Grid
 from .ground_state import initial_state, relax, renormalise
 from .lattice import bilayer_potential, harmonic_trap, moire_geometry
@@ -62,6 +62,7 @@ class TrappedSpec:
     polish_steps: int = 20000
     m: int = 22
     n: int = 1
+    dtype: str = "complex128"  # of the trapped solve; the supercell scan always runs in complex128
 
     def couplings(self) -> tuple[float, float]:
         u = units.lattice_units(omega_z_hz=self.omega_z_hz)
@@ -71,15 +72,19 @@ class TrappedSpec:
         return units.lattice_units().rad_s_to_ER(2.0 * math.pi * self.nu_r_hz)
 
 
-def _engine(grid: Grid, V: torch.Tensor, spec: TrappedSpec, g: float | None = None) -> BilayerGPE:
+def _engine(
+    grid: Grid, V: torch.Tensor, spec: TrappedSpec, g: float | None = None, dtype: str | None = None
+) -> BilayerGPE:
     g2d, wz = spec.couplings()
     g = g2d if g is None else g
     J = spec.Omega_R
+    dt = complex_dtype(spec.dtype if dtype is None else dtype)
+    grid = grid.to(REAL_OF[dt])
     if spec.vertical == "npse" and g > 0:
-        return BilayerGPE(grid, V=V, g=0.0, Omega_R=J, dtype=torch.complex128, interaction=NPSE2D(g, wz))
+        return BilayerGPE(grid, V=V, g=0.0, Omega_R=J, dtype=dt, interaction=NPSE2D(g, wz))
     if spec.vertical not in ("npse", "fixed"):
         raise ValueError("vertical must be 'npse' or 'fixed'")
-    return BilayerGPE(grid, V=V, g=g, Omega_R=J, dtype=torch.complex128)
+    return BilayerGPE(grid, V=V, g=g, Omega_R=J, dtype=dt)
 
 
 def supercell_grid(spec: TrappedSpec):
@@ -96,12 +101,12 @@ def supercell_scan(spec: TrappedSpec, verbose: bool = False) -> dict:
     V = bilayer_potential(grid, spec.V0, geo)
     A = geo.L_box**2
     t0 = time.perf_counter()
-    e0 = _engine(grid, V, spec, g=0.0)
+    e0 = _engine(grid, V, spec, g=0.0, dtype="complex128")
     r0 = relax(e0, initial_state(e0, A), A, tol=spec.scan_tol)
     out = dict(
         fillings=[], mus=[], cells=[], residuals=[], steps=[], E0=float(r0.mu[0]), E0_residual=float(r0.residual[0])
     )
-    eng = _engine(grid, V, spec)
+    eng = _engine(grid, V, spec, dtype="complex128")
     for f in spec.fillings:
         r = relax(eng, initial_state(eng, f * A), f * A, tol=spec.scan_tol)
         out["fillings"].append(float(f))
@@ -223,7 +228,7 @@ def trapped_ground_state(spec: TrappedSpec, scan: dict | None = None, verbose: b
     mu_lda = lda.solve_mu(VT_np, grid.dV, spec.N_atoms)
     f_env = lda(mu_lda - VT_np)
     psi_np = lda_cloud(scan["cells"], scan["fillings"], f_env, spec.box_cells)
-    psi_lda = torch.as_tensor(psi_np[None], dtype=torch.complex128, device=grid.device)
+    psi_lda = torch.as_tensor(psi_np[None], dtype=eng.dtype, device=grid.device)
     t_lda = eng.energy_terms(psi_lda)
     lda_info = dict(
         mu_lda=mu_lda,
@@ -239,9 +244,7 @@ def trapped_ground_state(spec: TrappedSpec, scan: dict | None = None, verbose: b
             f"E/N={lda_info['E_per_N']:.8f} mu={lda_info['mu']:.8f} E_R",
             flush=True,
         )
-    psi0 = torch.as_tensor(
-        add_noise(psi_np, grid, spec.noise, spec.seed)[None], dtype=torch.complex128, device=grid.device
-    )
+    psi0 = torch.as_tensor(add_noise(psi_np, grid, spec.noise, spec.seed)[None], dtype=eng.dtype, device=grid.device)
     tp = time.perf_counter()
     r = relax(eng, psi0, spec.N_atoms, tol=spec.tol, dt_schedule=[], polish_steps=spec.polish_steps, verbose=verbose)
     if verbose:
@@ -269,15 +272,21 @@ def cloud_numbers(eng: BilayerGPE, psi: torch.Tensor, L_cell: float) -> dict:
     """N, N2/N, R_rms (a and um), the mean total filling of the central moire cell |x|, |y| <= L/4
     (the AA cell at the origin), the atoms per supercell tile, the edge density relative to the peak."""
     p = to_numpy(psi[0])
-    n1, n2 = np.abs(p[0]) ** 2, np.abs(p[1]) ** 2
+    return cloud_numbers_from_density(np.abs(p[0]) ** 2, np.abs(p[1]) ** 2, eng.grid, L_cell)
+
+
+def cloud_numbers_from_density(n1: np.ndarray, n2: np.ndarray, grid: Grid, L_cell: float) -> dict:
+    """`cloud_numbers` of two (Nx, Ny) component densities [ix, iy] on a 2D grid (or on the (x, y)
+    axes of a 3D grid: a column density)."""
+    n1, n2 = np.asarray(n1, np.float64), np.asarray(n2, np.float64)
     n = n1 + n2
-    X, Y = np.meshgrid(*[x.numpy() for x in eng.grid.x64], indexing="ij")
-    dA = eng.grid.dV
+    X, Y = np.meshgrid(*[x.numpy() for x in grid.x64[:2]], indexing="ij")
+    dA = grid.dx[0] * grid.dx[1]
     N = float(n.sum() * dA)
     R = math.sqrt(float((n * (X**2 + Y**2)).sum() / n.sum()))
     cen = (np.abs(X) <= L_cell / 4) & (np.abs(Y) <= L_cell / 4)
     Nb = n.shape[0]
-    nt = Nb // round(eng.grid.L[0] / L_cell)
+    nt = Nb // round(grid.L[0] / L_cell)
     tiles = n.reshape(Nb // nt, nt, Nb // nt, nt).sum(axis=(1, 3)) * dA
     edge = max(n[0].max(), n[-1].max(), n[:, 0].max(), n[:, -1].max()) / n.max()
     a_um = units.lattice_units().a_m * 1e6
@@ -298,9 +307,14 @@ def insitu_observables(eng: BilayerGPE, psi: torch.Tensor, s_sat: float = 0.01, 
     AA/AB), C_raw_central, C_psf / C_img_central (legacy Gaussian PSF), C_coh / C_coh_img (coherent
     imaging at s_sat), C_coh_infocus (s = 0), n_AA, n_AB."""
     n = to_numpy(psi[0].real ** 2 + psi[0].imag ** 2).astype(np.float64)
-    dx = eng.grid.dx[0]
-    coh = imaging.standard_observables(n[0], n[1], dx, imaging="coherent", s_sat=s_sat, mn=mn)
-    foc = imaging.standard_observables(n[0], n[1], dx, imaging="pupil", mn=mn)
+    return insitu_from_density(n[0], n[1], eng.grid.dx[0], s_sat=s_sat, mn=mn)
+
+
+def insitu_from_density(n1: np.ndarray, n2: np.ndarray, dx: float, s_sat: float = 0.01, mn: tuple = (22, 1)) -> dict:
+    """`insitu_observables` of two (Nx, Ny) component densities [ix, iy] (or column densities)."""
+    n1, n2 = np.asarray(n1, np.float64), np.asarray(n2, np.float64)
+    coh = imaging.standard_observables(n1, n2, dx, imaging="coherent", s_sat=s_sat, mn=mn)
+    foc = imaging.standard_observables(n1, n2, dx, imaging="pupil", mn=mn)
     return dict(
         C_raw=coh["C_raw"],
         C_raw_central=coh.get("C_raw_central"),
