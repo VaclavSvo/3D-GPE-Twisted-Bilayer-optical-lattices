@@ -8,7 +8,10 @@
       conserved, the polished state is stationary and close to the LDA start, trapped.summary
       returns the in-situ contrasts, a different noise seed gives the same ground state;
 (iv)  pure trap (V0 = 0, g = 0, J only): the polished state is the 2D HO ground state of the lower
-      dressed level, E/N = hbar omega - J.
+      dressed level, E/N = hbar omega - J;
+(v)   the central-cell mean (nbar_centre_cell) of a density given as a function of the position is the
+      same in every box size: the boundary rows at |x| = L/4 carry half weight on both sides, so the
+      result no longer depends on how the grid coordinates round there.
 The N = 2000 cloud (anchors in twisted_bilayer.gates.references) is a run (`twisted-bilayer run
 trapped`, ~10 min CPU) gated by `twisted-bilayer gates --only E --trapped`.
 """
@@ -112,3 +115,21 @@ def test_trap_only_ho_ground_state():
     psi0 = torch.as_tensor(np.stack([amp, -amp])[None].astype(np.complex128))
     r = relax(eng, psi0, 1.0, tol=1e-11, dt_schedule=[])
     assert float(r.energy[0]) == pytest.approx(w - J, rel=1e-9)
+
+
+def test_centre_cell_mean_does_not_depend_on_the_box():
+    def density(X, Y):
+        return 1.0 + 0.3 * X + 0.05 * X**2 + 0.02 * X * Y + 0.04 * Y**2  # not symmetric, not periodic
+
+    means = []
+    for box in (3, 5, 7, 9):
+        grid, geo = TR.trap_grid(TR.TrappedSpec(box_cells=box))
+        X, Y = np.meshgrid(*[x.numpy() for x in grid.x64[:2]], indexing="ij")
+        means.append(TR.centre_cell_mean(density(X, Y), grid, geo.L_box))
+        if box == 3:
+            assert TR.centre_cell_mean(np.ones_like(X), grid, geo.L_box) == pytest.approx(1.0, abs=1e-15)
+    assert np.ptp(means) < 1e-12, means  # 88 / 89 boundary rows before the fix: 1e-3 here
+    # the odd terms cancel on the symmetric cell; for x^2 the trapezoid mean over [-h, h] with spacing dx
+    # (end points at half weight) is exactly h^2/3 + dx^2/6
+    h, dx = geo.L_box / 4, grid.dx[0]
+    assert means[0] == pytest.approx(1.0 + 0.09 * (h * h / 3 + dx * dx / 6), abs=1e-12)

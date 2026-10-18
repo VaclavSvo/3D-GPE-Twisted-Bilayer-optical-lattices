@@ -21,8 +21,10 @@ and mu_int(n) replaces g n in the Hamiltonian. The quartic is solved
 pointwise by Newton's method (6 iterations from s_0 = max(1, x^(1/3))).
 
 Use: BilayerGPE(..., interaction=NPSE2D(g2d, omega_z)) instead of g=g2d.
-Validate against the thin-z 3D check (thin_z.thin_z_check(..., npse=True)): the NPSE
-result must sit between the fixed-g_2D and the 3D ones.
+Validated against full 3D (thin_z.thin_z_check(..., npse=True); trapped3d.solve_models for the trapped
+cloud): the fixed-g_2D energy lies above the 3D one (psi(x, y) phi_0(z) is a 3D trial state), while the
+NPSE lies slightly below it, because the local width ignores the kinetic energy of its own gradient; on
+the experiment's trapped cloud the NPSE is within 7e-5 E_R of 3D in mu and 0.6 % in the contrast.
 
 Reference: Salasnich, Parola & Reatto, Phys. Rev. A 65, 043614 (2002);
 Salasnich & Malomed, Phys. Rev. A 79, 053620 (2009) (quasi-2D form).

@@ -275,6 +275,25 @@ def cloud_numbers(eng: BilayerGPE, psi: torch.Tensor, L_cell: float) -> dict:
     return cloud_numbers_from_density(np.abs(p[0]) ** 2, np.abs(p[1]) ** 2, eng.grid, L_cell)
 
 
+def _cell_weights(x: np.ndarray, half: float, dx: float) -> np.ndarray:
+    """Weights of the grid points x for the interval [-half, half]: 1 inside, 1/2 on a point that lies
+    on an end (within 1e-6 dx), 0 outside. Symmetric, and the weights sum to 2 half / dx whenever the
+    ends are grid points, so the result does not depend on how x_j = (j - N/2) dx rounds at the ends."""
+    d = np.abs(x) - half
+    tol = 1e-6 * dx
+    return np.where(d < -tol, 1.0, np.where(np.abs(d) <= tol, 0.5, 0.0))
+
+
+def centre_cell_mean(n: np.ndarray, grid: Grid, L_cell: float) -> float:
+    """Mean of n (Nx, Ny) [ix, iy] over the central moire cell |x|, |y| <= L_cell / 4 (one moire cell
+    of a supercell holding 2 x 2 of them), with the boundary rows at half weight (`_cell_weights`)."""
+    x, y = (g.numpy() for g in grid.x64[:2])
+    wx = _cell_weights(x, L_cell / 4, grid.dx[0])
+    wy = _cell_weights(y, L_cell / 4, grid.dx[1])
+    w = np.outer(wx, wy)
+    return float((w * n).sum() / w.sum())
+
+
 def cloud_numbers_from_density(n1: np.ndarray, n2: np.ndarray, grid: Grid, L_cell: float) -> dict:
     """`cloud_numbers` of two (Nx, Ny) component densities [ix, iy] on a 2D grid (or on the (x, y)
     axes of a 3D grid: a column density)."""
@@ -284,7 +303,6 @@ def cloud_numbers_from_density(n1: np.ndarray, n2: np.ndarray, grid: Grid, L_cel
     dA = grid.dx[0] * grid.dx[1]
     N = float(n.sum() * dA)
     R = math.sqrt(float((n * (X**2 + Y**2)).sum() / n.sum()))
-    cen = (np.abs(X) <= L_cell / 4) & (np.abs(Y) <= L_cell / 4)
     Nb = n.shape[0]
     nt = Nb // round(grid.L[0] / L_cell)
     tiles = n.reshape(Nb // nt, nt, Nb // nt, nt).sum(axis=(1, 3)) * dA
@@ -295,7 +313,7 @@ def cloud_numbers_from_density(n1: np.ndarray, n2: np.ndarray, grid: Grid, L_cel
         N2_over_N=float(n2.sum() * dA) / N,
         R_rms=R,
         R_rms_um=R * a_um,
-        nbar_centre_cell=float(n[cen].mean()),
+        nbar_centre_cell=centre_cell_mean(n, grid, L_cell),
         n_peak=float(n.max()),
         atoms_per_tile=tiles.tolist(),
         edge_density_rel=float(edge),

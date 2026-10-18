@@ -34,7 +34,7 @@ def test_quartic_root_and_envelope():
     assert bool((f.mu_int(n) < u.g2d * n).all())
 
 
-def test_npse_sits_between_fixed_and_3d():
+def test_npse_is_closer_to_3d_than_fixed_g():
     """Thin-z sandwich at V0 = 8, Omega_R = 1, filling 3 on a (3,1) supercell
     (pocket regime, where the fixed width is 10-20 % off): the NPSE column
     density and mu must be closer to the 3D ones than the fixed-g2d ones."""

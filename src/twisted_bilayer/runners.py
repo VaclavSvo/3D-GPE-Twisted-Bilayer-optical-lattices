@@ -10,6 +10,7 @@ TWISTED_BILAYER_FORCE_CPU before it imports this module when a run must stay on 
 
 from __future__ import annotations
 
+import csv
 import json
 import math
 import os
@@ -33,6 +34,7 @@ from twisted_bilayer.engine.observables import (
 )
 from twisted_bilayer.engine.physics import BilayerGPE, choose_dt
 from twisted_bilayer.engine.units import KAPPA, lattice_units
+from twisted_bilayer.records import write_json
 
 VERBOSE = True  # progress output of the long runs
 TOL_GATES = 0.01  # pass/fail tolerance on norm and energy drift of a real-time run
@@ -92,6 +94,38 @@ def run_coupling_scan(name: str, row: dict) -> None:
     if unconverged:
         print(f"WARNING: not converged to tol at Omega_R = {unconverged}; residuals in the table")
     print(f"wrote {out}/coupling_scan.{{png,csv,npz,txt}} and run_metadata.json; total {res.timing['total_s']:.1f} s")
+
+
+# ── the bridge: lattice mean field against the continuum GPE ───────────────────
+
+
+def run_bridge(name: str, row: dict) -> None:
+    """The discrete GPE of the two-layer Bose-Hubbard model (variant C, with and without the interband
+    shift) against the continuum GPE on the same supercell at fixed g2d (manybody.bridge): mu, E/N from
+    each model's band bottom, f_s, the AA/AB density ratio, N2/N and the participation ratio over V0 and
+    Omega_R, as a table, a json and a figure of the differences. One gate: mu - E_bottom at V0 = 16,
+    Omega_R = 0 within 5 %."""
+    from twisted_bilayer.manybody.bridge import BridgeSpec, bridge, format_bridge, save_bridge
+
+    torch.set_num_threads(min(4, os.cpu_count() or 1))
+    spec = BridgeSpec(**{k: row[k] for k in row if k != "kind"})
+    geo = moire_geometry(spec.m, spec.n)
+    N = geo.grid_size(spec.points_per_a)
+    _section("pre-flight")
+    print(describe_device())
+    print(geo.describe())
+    print(
+        f"continuum: grid {N}x{N} ({N / geo.L_box:.2f} points per a), {len(spec.Omega_R)} couplings x 3 twists per V0, "
+        f"{spec.dtype_relax} / {spec.dtype_polish}; lattice: {2 * (spec.m**2 + spec.n**2)} sites, complex128"
+    )
+    print(f"V0 = {spec.V0}, Omega_R = {spec.Omega_R}, filling {spec.filling}, nu_z = {spec.nu_z_hz:g} Hz")
+    _section("run")
+    res = bridge(spec, verbose=VERBOSE)
+    out = _outdir(name)
+    save_bridge(res, out)
+    _section("result")
+    print(format_bridge(res))
+    print(f"wrote {out}/bridge.{{txt,json,png}}")
 
 
 # ── thin-z check ───────────────────────────────────────────────────────────────
@@ -339,12 +373,18 @@ def run_tight_binding(name: str, row: dict) -> None:
     torch.set_num_threads(min(4, os.cpu_count() or 1))
     t_all = time.time()
     V0, m, n, filling, theta = row["V0"], row["m"], row["n"], row["filling"], row["theta"]
-    g2d = lm.G2D_DEFAULT if row.get("g2d") is None else row["g2d"]
+    g2d, g2d_source = lm.resolve_g2d(row.get("g2d"), row.get("nu_z_hz"))
+    g2d_note = {
+        "explicit": "given by the row",
+        "nu_z": f"from nu_z = {row.get('nu_z_hz')} Hz (lattice_model.g2d_from_nu_z)",
+        "default": "the shipped lattice_model.G2D_DEFAULT",
+    }[g2d_source]
     J = bands.hopping_1d(V0, 2)
     U = bands.onsite_U(V0, g2d)
     geo = lm.supercell_sites(m, n).geometry
     head = [
-        f"Two-layer tight binding, V0 = {V0} E_R, filling {filling} atoms/a^2 (both layers), g2d = {g2d} E_R a^2",
+        f"Two-layer tight binding, V0 = {V0} E_R, filling {filling} atoms/a^2 (both layers), "
+        f"g2d = {g2d:.7f} E_R a^2 ({g2d_note})",
         f"  {geo.describe()}; {2 * (m**2 + n**2)} sites",
         f"  J1 = {J[0]:.6f}, J2 = {J[1]:.3e}, U = {U:.6f} E_R (U/J1 = {U / J[0]:.2f}); "
         f"twist theta = {theta} across the box",
@@ -703,7 +743,7 @@ def _trapped3d_row(row: dict):
     size = dict(
         box_cells=row.get("box_cells", "auto"),
         Nz=row.get("Nz", "auto"),
-        Nz_min=row.get("Nz_min", 24),
+        Nz_min=row.get("Nz_min", 16),
         Nz_max=row.get("Nz_max", 128),
         cpu_box_cells=row.get("cpu_box_cells", 1),
         cpu_Nz=row.get("cpu_Nz", 24),
@@ -990,6 +1030,59 @@ def run_trapped_3d_nz(name: str, row: dict) -> None:
     print(f"wrote {out}/summary.json, report.txt")
 
 
+def run_xy_convergence(name: str, row: dict) -> None:
+    """In-plane resolution (engine.convergence): the homogeneous supercell at several points per a, and the
+    trapped cloud at several points per supercell, each against the finest. Sub-dicts `supercell` and
+    `trapped` of the row; either may be absent. complex128 throughout."""
+    from twisted_bilayer.engine import convergence as CV
+    from twisted_bilayer.engine import trapped as TR
+
+    _section("pre-flight")
+    print(describe_device())
+    sc, tr = row.get("supercell"), row.get("trapped")
+    tolerances = row.get("tolerances")
+    if sc:
+        print(
+            f"supercell: V0 = {sc['V0_list']}, Omega_R = {sc['Omega_R']}, points per a = {sc['ppa_list']}, "
+            f"m = {sc.get('m', 22)}"
+        )
+    if tr:
+        print(f"trapped: points per supercell = {tr['cell_points_list']}, box {tr.get('box_cells', 3)}")
+    _section("run")
+    conv_sc = conv_tr = None
+    if sc:
+        conv_sc = CV.supercell_convergence(
+            sc["V0_list"],
+            sc["Omega_R"],
+            sc["ppa_list"],
+            m=sc.get("m", 22),
+            n=sc.get("n", 1),
+            filling=sc.get("filling", 1.0),
+            vertical=sc.get("vertical", "npse"),
+            tol=sc.get("tol", 1e-9),
+            verbose=VERBOSE,
+        )
+    if tr:
+        keys = {k: v for k, v in tr.items() if k not in ("cell_points_list", "kind", "s_sat")}
+        spec = TR.TrappedSpec(**keys)
+        conv_tr = CV.trapped_convergence(spec, tr["cell_points_list"], verbose=VERBOSE)
+    text = CV.report(conv_sc, conv_tr, tolerances)
+    out = _outdir(name)
+    write_json(os.path.join(out, "summary.json"), CV.to_record(conv_sc, conv_tr, tolerances))
+    sc_rows, tr_rows = CV.table_rows(conv_sc, conv_tr)
+    for fname, rows in (("supercell.csv", sc_rows), ("trapped.csv", tr_rows)):
+        if rows:
+            with open(os.path.join(out, fname), "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=list(rows[0]))
+                w.writeheader()
+                w.writerows(rows)
+    with open(os.path.join(out, "report.txt"), "w") as f:
+        f.write(text + "\n")
+    _section("result")
+    print(text)
+    print(f"wrote {out}/summary.json, report.txt, supercell.csv, trapped.csv")
+
+
 def dataclasses_asdict(obj) -> dict:
     import dataclasses
 
@@ -1002,12 +1095,14 @@ KINDS = {
     "rabi": run_rabi,
     "toy1d": run_toy1d,
     "tight_binding": run_tight_binding,
+    "bridge": run_bridge,
     "bdg": run_bdg,
     "trapped": run_trapped,
     "gpu_check": run_gpu_check,
     "trapped_3d": run_trapped_3d,
     "trapped_3d_precision": run_trapped_3d_precision,
     "trapped_3d_nz": run_trapped_3d_nz,
+    "xy_convergence": run_xy_convergence,
 }
 
 
@@ -1045,6 +1140,7 @@ def _provenance() -> dict:
 # and `trapped_3d_precision` runs both precisions by design.
 PRECISION_KEYS = {
     "coupling_scan": ("dtype_relax", "dtype_polish"),
+    "bridge": ("dtype_relax", "dtype_polish"),
     "thin_z": ("dtype_relax", "dtype_polish"),
     "rabi": ("dtype",),
     "trapped": ("dtype",),

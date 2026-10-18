@@ -239,3 +239,37 @@ def test_moire_band_width_separable_at_omega0():
         expect = (E1(kx * c - ky * s) + E1(ky * c + kx * s)).min()
         assert w[name][0] == pytest.approx(expect, abs=1e-8), name
         assert w[name][1] == pytest.approx(expect, abs=1e-8)  # the other layer, same energy
+
+
+# -- higher-band Wannier functions and their overlaps --------------------------------------
+
+
+@pytest.mark.parametrize("V0", [8.0, 12.0, 16.0])
+def test_band_wannier_gauge_orthogonality_parity_and_completeness(V0):
+    """`wannier_coefficients_band` / `overlap_bands_1d`: band 0 reproduces `overlap_1d` (the same
+    real symmetric Wannier function); s_ab(0) = delta_ab and s_ab(integer) = 0 (orthonormal Wannier
+    functions); s_ab(-d) = (-1)^(a+b) s_ab(d) (parity (-1)^b); the band centres are ordered; and the
+    gauge-free band weights sum to 1 over all n_pw bands (completeness in the plane-wave space),
+    while 6 bands hold > 99.9 % of a half-site-displaced lowest-band function."""
+    d = np.linspace(-2.0, 2.0, 17)
+    assert np.allclose(bands.overlap_bands_1d(V0, d, 0, 0), bands.overlap_1d(V0, d), atol=1e-14)
+    for a in range(4):
+        for b in range(4):
+            assert bands.overlap_bands_1d(V0, 0.0, a, b) == pytest.approx(float(a == b), abs=1e-12)
+            assert bands.overlap_bands_1d(V0, 1.0, a, b) == pytest.approx(0.0, abs=1e-12)
+            assert bands.overlap_bands_1d(V0, 2.0, a, b) == pytest.approx(0.0, abs=1e-12)
+            sp, sm = bands.overlap_bands_1d(V0, 0.37, a, b), bands.overlap_bands_1d(V0, -0.37, a, b)
+            assert sm == pytest.approx((-1) ** (a + b) * sp, abs=1e-12)
+    e = bands.band_centres_1d(V0, 6)
+    assert np.all(np.diff(e) > 0) and e[1] - e[0] == pytest.approx(2.0 * math.sqrt(V0), rel=0.25)
+    for dd in (0.0, 0.25, 0.5, 0.9):
+        w = np.array([bands.band_weight_1d(V0, dd, b) for b in range(31)])
+        assert w.sum() == pytest.approx(1.0, abs=1e-12)
+        assert np.all(w >= -1e-14)
+        n = np.arange(-32, 32)
+        for b in range(5):  # the gauge-fixed overlaps sum to the same weight
+            assert (bands.overlap_bands_1d(V0, dd + n, 0, b) ** 2).sum() == pytest.approx(w[b], abs=1e-12)
+    w = np.array([bands.band_weight_1d(V0, 0.5, b) for b in range(8)])
+    assert w[0] == pytest.approx((bands.overlap_1d(V0, 0.5 + np.arange(-32, 32)) ** 2).sum(), abs=1e-12)
+    assert w[:6].sum() > 0.999 and w[:4].sum() > 0.95
+    assert bands._ho_sigma(V0) == pytest.approx((math.pi**2 * math.sqrt(V0)) ** -0.5, rel=1e-12)

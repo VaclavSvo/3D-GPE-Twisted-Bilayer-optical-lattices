@@ -80,7 +80,7 @@ TRAPPED_3D_DEFAULTS = dict(
     dtype_2d="complex128",  # the two quasi-2D solves
     box_cells="auto",
     Nz="auto",
-    Nz_min=24,
+    Nz_min=16,  # gpu_3d_nz: N_z = 16 ... 96 agree to the complex64 floor on the experiment's cloud
     Nz_max=128,
     memory_fraction=0.85,
 )
@@ -150,7 +150,9 @@ SCENARIOS = {
         vertical="fixed",
     ),
     # the two-layer tight-binding (Bose-Hubbard) mean field, variants A/B/C, on the experiment's supercell;
-    # compare_m: single-particle tight binding against the continuum on the m = 4 cell (0: skip)
+    # compare_m: single-particle tight binding against the continuum on the m = 4 cell (0: skip).
+    # The interaction: g2d if given, else from nu_z_hz (engine.lattice_model.g2d_from_nu_z), else the shipped
+    # lattice_model.G2D_DEFAULT (both None, as here)
     "tight_binding": dict(
         kind="tight_binding",
         V0=8.0,
@@ -158,12 +160,54 @@ SCENARIOS = {
         n=TWIST_N,
         filling=1.0,
         g2d=None,
+        nu_z_hz=None,
         theta=0.3,
         Omega_R=(0.0, 0.1, 0.24, 0.5, 1.0),
         variants="ABC",
         compare_m=4,
     ),
+    # the bridge (docs/manybody.md): the lattice mean field (variant C, with and without the interband shift)
+    # against the continuum GPE at fixed g2d on the same cell; mu, E/N, f_s, AA/AB, N2/N, PR over V0 and Omega_R.
+    # Always complex128 (energy differences of 1e-3 E_R). The m = 4 row takes about a minute on a CPU
+    "bridge_quick": dict(
+        kind="bridge",
+        V0=(8.0, 12.0, 16.0),
+        Omega_R=(0.0, 0.24, 0.6, 1.0),
+        m=4,
+        n=1,
+        filling=1.0,
+        nu_z_hz=NU_Z_HZ,
+        points_per_a=16.0,
+        theta=0.3,
+        tol=1e-8,
+        dtype_relax="complex128",
+        dtype_polish="complex128",
+        cutoff=2.0,
+        frame="layer1",
+        interband_n_bands=6,
+        tb_tol=1e-11,
+    ),
     # ── the experiment's geometry (theta = 5.2 deg) ──
+    # the same on the experiment's supercell (12 continuum ground states x 3 twists at 16 points per a: minutes
+    # on a GPU, hours on 2 CPU cores)
+    "bridge": dict(
+        kind="bridge",
+        V0=(8.0, 12.0, 16.0),
+        Omega_R=(0.0, 0.24, 0.6, 1.0),
+        m=TWIST_M,
+        n=TWIST_N,
+        filling=1.0,
+        nu_z_hz=NU_Z_HZ,
+        points_per_a=16.0,
+        theta=0.3,
+        tol=1e-8,
+        dtype_relax="complex128",
+        dtype_polish="complex128",
+        cutoff=2.0,
+        frame="layer1",
+        interband_n_bands=6,
+        tb_tol=1e-11,
+    ),
     # coupling scan at V0 = 4 E_R on the sqrt(485) supercell, 12 points per a (~6 min on 2 CPU cores)
     "coupling_scan_v4": dict(
         SCAN_DEFAULTS, V0=4.0, filling=1.0, points_per_a=12.0, Omega_R=(0.0, 0.12, 0.24, 0.5, 1.0)
@@ -194,6 +238,35 @@ SCENARIOS = {
     # convergence in the vertical resolution: the 3 x 3 cloud in 3D at N_z = 16 ... 96 over the same z box
     # (dz = 0.62 ... 0.10 l_z), against the finest; N_z that do not fit the GPU are skipped (~10 min, 6 GB)
     "gpu_3d_nz": dict(TRAPPED_3D_DEFAULTS, kind="trapped_3d_nz", box_cells=3, Nz_list=(16, 24, 32, 48, 64, 96)),
+    # in-plane resolution: the homogeneous supercell (V0 = 4, 8, 16; f_s is the most sensitive quantity) at
+    # 4 ... 24 points per a, and the trapped cloud at 88 ... 352 points per supercell (4 ... 16 per a), each
+    # against the finest, complex128 (GPU: tens of minutes)
+    "gpu_xy_convergence": dict(
+        kind="xy_convergence",
+        supercell=dict(V0_list=(4.0, 8.0, 16.0), Omega_R=(0.0, 0.24, 1.0), ppa_list=(4, 6, 8, 12, 16, 24), m=22),
+        trapped=dict(
+            {k: v for k, v in TRAPPED_DEFAULTS.items() if k not in ("kind", "s_sat", "dtype")},
+            cell_points_list=(88, 132, 176, 264, 352),
+            tol=1e-9,
+        ),
+    ),
+    # the same on the small m = 4 cell (~2 min on a CPU)
+    "xy_convergence_quick": dict(
+        kind="xy_convergence",
+        supercell=dict(V0_list=(4.0, 8.0), Omega_R=(0.0, 0.24, 1.0), ppa_list=(6, 8, 12, 16), m=4),
+        trapped=dict(
+            V0=V0_ER,
+            Omega_R=J_PERP_ER[0.243],
+            N_atoms=60.0,
+            nu_r_hz=200.0,
+            m=4,
+            n=1,
+            fillings=(0.5, 1.0, 2.0, 3.0),
+            box_cells=3,
+            tol=1e-9,
+            cell_points_list=(24, 32, 48, 64),
+        ),
+    ),
     # the same on the small m = 4 cloud (~1 min on a CPU)
     "trapped_3d_nz_quick": dict(
         TRAPPED_3D_DEFAULTS,

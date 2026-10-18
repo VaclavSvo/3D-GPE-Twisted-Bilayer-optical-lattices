@@ -144,6 +144,96 @@ def overlap_1d(V0, d, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
     return out.reshape(d_arr.shape) if d_arr.ndim else float(out[0])
 
 
+def _ho_sigma(V0: float, kappa: float = KAPPA) -> float:
+    """Oscillator length of the site well in the harmonic approximation,
+    V0 sin^2(pi x) ~ V0 pi^2 x^2: omega = 2 sqrt(V0 kappa) pi, sigma^2 = 2 kappa / omega."""
+    omega = 2.0 * math.pi * math.sqrt(V0 * kappa)
+    return math.sqrt(2.0 * kappa / omega)
+
+
+def wannier_coefficients_band(V0: float, band: int = 0, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+    """Phase-fixed Bloch coefficients of band `band` (0 = lowest) in the projection
+    gauge: <g|psi_q> real and positive, with g the harmonic-oscillator state of
+    order `band` of the site well, centred at x = 0 (its Fourier transform is
+    (-i)^band H_band(k sigma) e^{-k^2 sigma^2 / 2}). For the even potential this is
+    the gauge of the real Wannier function of parity (-1)^band centred at x = 0,
+    i.e. the maximally localised one (Kohn 1959: real and symmetric fixes the gauge
+    up to a sign and a lattice translation); for band 0 it coincides with
+    `_wannier_coefficients` (psi_q(0) > 0). Raises if the projection weight
+    |<g|psi_q>| drops below 1 % of its maximum at some q (the gauge would be
+    ill-defined there). Returns (q, l, c (n_q, n_pw) complex, E (n_q,))."""
+    q = bz_grid(n_q)
+    E, C, l = _bloch_1d(V0, q, n_pw, kappa)
+    c = C[:, :, band].astype(np.complex128)
+    k = q[:, None] + 2.0 * math.pi * l[None, :]
+    z = k * _ho_sigma(V0, kappa)
+    herm = np.polynomial.hermite.hermval(z, [0.0] * band + [1.0])
+    g_conj = (1j) ** band * herm * np.exp(-0.5 * z * z)  # conj of the trial's Fourier transform at k
+    o = (c * g_conj).sum(axis=1)
+    if np.abs(o).min() < 1e-2 * np.abs(o).max():
+        raise RuntimeError(f"band {band}: the projection gauge is ill-defined at some q (V0 = {V0})")
+    c = c * (np.conj(o) / np.abs(o))[:, None]
+    return q, l, c, E[:, band]
+
+
+def band_centres_1d(V0: float, n_bands: int = 4, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA) -> np.ndarray:
+    """<E_b(q)>_BZ for b = 0..n_bands - 1: the energy of the Wannier function of
+    band b (its on-site energy)."""
+    _, E = bands_1d(V0, n_q, n_pw, n_bands, kappa)
+    return E.mean(axis=0)
+
+
+def overlap_bands_1d(V0, d, band_a: int = 0, band_b=0, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+    """s_ab(d) = int w_a(x) w_b(x - d) dx between the Wannier functions of bands
+    a and b (`wannier_coefficients_band` gauge), for any real d:
+
+        s_ab(d) = (1/n_q) sum_q sum_l conj(c^a_l(q)) c^b_l(q) e^{-i k_l d},  k_l = q + 2 pi l,
+
+    exact on the Born-von Karman ring. s_00 = `overlap_1d`; s_ab(0) = delta_ab
+    (orthonormality of the Wannier functions of one site); s_ab(integer n != 0) = 0;
+    s_ab(-d) = (-1)^(a + b) s_ab(d) (parity). Over all n_pw bands and all sites,
+    sum_b sum_n s_ab(d + n)^2 = 1 for any d (completeness). band_b may be a sequence
+    of bands: then the result has a leading axis over them (one phase table for all)."""
+    many = np.ndim(band_b) > 0
+    bs = [int(b) for b in np.atleast_1d(band_b)]
+    _, l, ca, _ = wannier_coefficients_band(V0, band_a, n_q, n_pw, kappa)
+    q = bz_grid(n_q)
+    k = (q[:, None] + 2.0 * math.pi * l[None, :]).ravel()
+    P = np.stack([(np.conj(ca) * wannier_coefficients_band(V0, b, n_q, n_pw, kappa)[2]).ravel() / n_q for b in bs], 1)
+    d_arr = np.asarray(d, dtype=np.float64)
+    dflat = d_arr.ravel()
+    out = np.empty((dflat.size, len(bs)), dtype=np.complex128)
+    chunk = max(1, 2_000_000 // k.size)
+    for i in range(0, dflat.size, chunk):
+        out[i : i + chunk] = np.exp(-1j * np.outer(dflat[i : i + chunk], k)) @ P
+    if np.abs(out.imag).max(initial=0.0) > 1e-10:
+        raise RuntimeError("overlap_bands_1d: non-real overlap (gauge not time-reversal symmetric)")
+    out = out.real.T.reshape((len(bs),) + d_arr.shape)
+    if many:
+        return out
+    return out[0] if d_arr.ndim else float(out[0].ravel()[0])
+
+
+def band_weight_1d(V0: float, d, band: int, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+    """sum_n s_0b(d + n)^2 over all sites n of the ring: the weight of the lowest-band
+    Wannier function displaced by d in band b of the undisplaced lattice. Gauge
+    independent (Parseval: (1/n_q) sum_q |sum_l conj(c^0_l(q)) c^b_l(q) e^{-i k_l d}|^2,
+    with the raw eigenvectors), so it is defined for every band, and
+    sum_b over all n_pw bands = 1 exactly (completeness in the plane-wave space).
+    1 - band_weight_1d(V0, d, 0) is the part of a displaced Wannier function that
+    the lowest-band projection drops."""
+    _, l, c0 = _wannier_coefficients(V0, n_q, n_pw, kappa)
+    q = bz_grid(n_q)
+    _, C, _ = _bloch_1d(V0, q, n_pw, kappa)
+    k = q[:, None] + 2.0 * math.pi * l[None, :]
+    d_arr = np.asarray(d, dtype=np.float64)
+    out = np.empty(d_arr.size)
+    for i, dd in enumerate(d_arr.ravel()):
+        A = (np.conj(c0) * C[:, :, band] * np.exp(-1j * k * dd)).sum(axis=1)
+        out[i] = float((np.abs(A) ** 2).mean())
+    return out.reshape(d_arr.shape) if d_arr.ndim else float(out[0])
+
+
 def I4_1d(V0: float, n_pw: int = 31, n_x: int = 64, n_q: int = 64, kappa: float = KAPPA) -> float:
     """int w^4 dx (units 1/a) of the maximally localised Wannier function,
     over the whole ring (periodic trapezoid = spectrally accurate)."""

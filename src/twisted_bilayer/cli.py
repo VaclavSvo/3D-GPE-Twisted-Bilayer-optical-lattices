@@ -7,6 +7,7 @@
     twisted-bilayer run bdg --cpu                   stay on the CPU when a GPU is present
     twisted-bilayer run gpu_3d_vs_2d --128          complex128 throughout (publication runs)
     twisted-bilayer gates [--full] [--trapped]      the physics gates (see twisted_bilayer.gates)
+    twisted-bilayer panel quick | broad             every check with one verdict (see twisted_bilayer.panel)
 
 The engine picks its device when it is imported, so this module imports it only after the command line
 has decided whether the run must stay on the CPU.
@@ -48,6 +49,21 @@ def _cmd_run(a) -> int:
     return 0
 
 
+def _cmd_panel(a) -> int:
+    if a.cpu:
+        os.environ[FORCE_CPU] = "1"
+    from twisted_bilayer import panel
+
+    if a.list:
+        for s in panel.PANELS[a.name]:
+            flags = ", ".join(f for f, on in (("checkout", s.needs_checkout), ("GPU", s.needs_gpu)) if on)
+            print(f"{s.name:<14s} {s.what}" + (f"  [needs {flags}]" if flags else ""))
+        return 0
+    only = [x.strip() for x in a.only.split(",")] if a.only else None
+    skip = [x.strip() for x in a.skip.split(",")] if a.skip else None
+    return panel.run_panel(a.name, out_root=a.out, only=only, skip=skip)
+
+
 def _cmd_gates(rest: list[str]) -> int:
     wants_cuda = any(arg.startswith("--device") and "cuda" in arg for arg in rest) or (
         "--device" in rest and rest.index("--device") + 1 < len(rest) and rest[rest.index("--device") + 1] == "cuda"
@@ -84,6 +100,21 @@ def main(argv: list[str] | None = None) -> int:
         help="run in complex128 throughout (publication figures); without it a row runs in the precision it names",
     )
     p.set_defaults(fn=_cmd_run)
+    p = sub.add_parser(
+        "panel", help="run a check panel: quick (CPU, before a commit) or broad (GPU, after a big change)"
+    )
+    p.add_argument("name", choices=["quick", "broad"])
+    p.add_argument(
+        "--out",
+        default=None,
+        help="output folder; each run goes to OUT/panel_NAME/<date_time>/ (default: results/ of the source "
+        "checkout, or ./results)",
+    )
+    p.add_argument("--only", default="", help="comma-separated step names (see --list)")
+    p.add_argument("--skip", default="", help="comma-separated step names to leave out")
+    p.add_argument("--list", action="store_true", help="list the steps and exit")
+    p.add_argument("--cpu", action="store_true", help="stay on the CPU even when a GPU is present")
+    p.set_defaults(fn=_cmd_panel)
     sub.add_parser("gates", help="run the physics gates")
     a = ap.parse_args(argv)
     return a.fn(a)

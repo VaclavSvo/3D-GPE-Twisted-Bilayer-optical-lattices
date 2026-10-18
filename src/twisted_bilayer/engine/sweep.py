@@ -7,7 +7,8 @@ Pipeline (all batched over Omega_R, so one GPU call per stage):
      (uniform density, component 2 at relative phase pi);
   2. from each of those, the twisted ground states theta_x = theta e_x and
      theta_y = theta e_y;
-  3. observables: E/N, mu, f_s^xx and f_s^yy by energy and by current,
+  3. observables: E/N, mu, f_s^xx and f_s^yy by energy and by current, and
+     their twist-free limit f_s = 2 f_energy - f_current (columns fs_xx, fs_yy),
      Leggett lower/upper brackets along x and y from the twist-0 density,
      participation ratio, moire contrast (raw and blurred over the primary
      lattice), N_2/N, residuals.
@@ -85,6 +86,7 @@ class SweepResult:
             "Omega_over_J",
             "E_per_N",
             "mu",
+            "fs_xx",
             "fs_xx_energy",
             "fs_xx_current",
             "fs_yy_energy",
@@ -286,6 +288,12 @@ def coupling_scan(spec: SweepSpec, verbose: bool = True, device: torch.device | 
         lo, up = leggett_bounds(dens0, grid, ax)
         cols[f"fs_{name}{name}_energy"] = to_numpy(fsE)
         cols[f"fs_{name}{name}_current"] = to_numpy(fsI)
+        # The two routes carry the finite-twist term with slopes b and 2b in theta^2 (E(theta) - E(0) is
+        # quartic in theta beyond the f_s term), so 2 f_E - f_C removes it: the theta -> 0 limit to
+        # O(theta^4). Measured 17 Oct on m = 22 at theta = 0.1 / 0.2 / 0.3: slope ratio 2.00-2.04, the
+        # limit to <= 3e-7 (docs: results 9.3.3). The current route is first order in the state error,
+        # so this needs a tight tol (<= 1e-10) in deep lattices.
+        cols[f"fs_{name}{name}"] = to_numpy(2.0 * fsE - fsI)
         cols[f"leggett_{name}_lower"] = to_numpy(lo)
         cols[f"leggett_{name}_upper"] = to_numpy(up)
         cols[f"residual_{name}"] = to_numpy(r.residual)

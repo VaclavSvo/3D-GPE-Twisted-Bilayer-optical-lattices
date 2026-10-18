@@ -25,3 +25,23 @@ def test_run_accepts_128(monkeypatch):
     assert seen["d"] is True
     assert cli.main(["run", "toy1d"]) == 0
     assert seen["d"] is False
+
+
+def test_panels_are_consistent(capsys):
+    from twisted_bilayer import panel
+
+    quick = [s.name for s in panel.QUICK]
+    broad = [s.name for s in panel.BROAD]
+    assert quick == broad[: len(quick)]  # broad is quick plus more
+    assert len(set(broad)) == len(broad)
+    assert cli.main(["panel", "broad", "--list"]) == 0
+    assert "experiment_3d" in capsys.readouterr().out
+
+
+def test_panel_references_have_tolerances():
+    from twisted_bilayer.gates import panel_references as R
+
+    for model, values in R.QUICK_3D.items():
+        assert set(values) <= set(R.QUICK_3D_TOL), model
+    for model, values in R.EXPERIMENT_3D.items():
+        assert set(values) <= set(R.EXPERIMENT_3D_TOL[model]), model
