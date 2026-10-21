@@ -27,6 +27,7 @@ validation.md
 /outputs/
 /runs/
 /examples/output/
+/examples/showcase/showcase_results/
 *.npz
 *.png
 *.csv
