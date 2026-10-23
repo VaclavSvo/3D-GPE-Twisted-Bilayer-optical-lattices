@@ -2,6 +2,7 @@
 physics of a tiny cloud on the m = 4 cell."""
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -143,3 +144,12 @@ def test_nz_convergence_is_spectral():
     assert abs(a["mu"] - b["mu"]) < 0.05 * gap
     assert abs(a["C_raw"] - b["C_raw"]) < 0.05 * abs(b["C_raw"] - conv["npse"]["C_raw"])
     assert "second-finest" in T3.report_nz(conv)
+
+
+def test_3d_runs_refuse_instead_of_enlarging():
+    """A 3D run's box and N_z are sized before the scan, so containment="enlarge" is turned into "refuse"
+    (with a warning): a cloud too wide for the box stops before any solve instead of growing the 3D grid."""
+    wide = replace(TINY, nu_r_hz=40.0, containment="enlarge")
+    with pytest.warns(RuntimeWarning, match="not available for 3D"):
+        with pytest.raises(TR.UncontainedCloud):
+            T3.solve_models(wide, T3.Vertical(Nz=8), "complex128")

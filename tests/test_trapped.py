@@ -39,6 +39,90 @@ def test_lda_inverse_and_solve_mu():
         TR.LDA(1.0, [0.5, 1.0], [1.2, 1.1])
 
 
+def test_solve_mu_beyond_the_initial_bracket():
+    """solve_mu doubles its bracket until it holds N: a flat potential with N far above what E0 + 10
+    holds (it used to return E0 + 10 silently); inside [E0, E0 + 10] the result is the plain bisection's."""
+    lda = TR.LDA(1.0, [0.5, 1.0, 2.0], [1.1, 1.2, 1.4])
+    VT = np.zeros(100)
+    N = 1e6
+    mu = lda.solve_mu(VT, 1.0, N)
+    assert mu > 1.0 + 10.0 and lda(mu - VT).sum() == pytest.approx(N, rel=1e-9)
+    VT = np.linspace(0.0, 0.5, 101) ** 2
+    lo, hi = 1.0, 11.0  # the bisection as it was before the bracket could grow
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if lda(mid - VT).sum() * 0.1 < 5.0 else (lo, mid)
+    assert lda.solve_mu(VT, 0.1, 5.0) == 0.5 * (lo + hi)
+
+
+def test_lda_in_the_plane_closed_form():
+    """atoms_in_plane against the closed form for a linear f(mu) = c (mu - E0) (scan points on a line):
+    N = (2 pi / (m w^2)) c (mu - E0)^2 / 2, R_TF = sqrt(2 (mu - E0) / m) / w; and against a box sum on a
+    grid that holds the whole cloud."""
+    E0, c = 1.0, 3.0
+    lda = TR.LDA(E0, [0.3, 0.6, 1.2], [E0 + 0.1, E0 + 0.2, E0 + 0.4])
+    w, mu = 0.05, E0 + 0.7  # above the last scan point: the linear extrapolation
+    m = TR.units.M_LATTICE
+    assert lda.atoms_in_plane(mu, w) == pytest.approx(2 * np.pi / (m * w * w) * c * 0.7**2 / 2, rel=1e-12)
+    N = 500.0
+    mu_p = lda.solve_mu_plane(N, w)
+    assert lda.atoms_in_plane(mu_p, w) == pytest.approx(N, rel=1e-10)
+    R = np.sqrt(2 * (mu_p - E0) / m) / w
+    x = np.linspace(-1.5 * R, 1.5 * R, 1201)
+    X, Y = np.meshgrid(x, x, indexing="ij")
+    VT = 0.5 * m * w * w * (X**2 + Y**2)
+    dA = (x[1] - x[0]) ** 2
+    assert lda.solve_mu(VT, dA, N) == pytest.approx(mu_p, rel=1e-4)  # same cloud: the box holds it
+
+
+def test_containment_policies():
+    """resolve_box on a cloud wider than its box (the quick cell at a weak trap): refuse (default)
+    raises and names the box that holds it; enlarge runs it on that box at the same N and nu_r; warn
+    returns it unchanged with a warning. The quick cloud itself fits."""
+    spec = TR.TrappedSpec(**QUICK)
+    scan = TR.supercell_scan(spec)
+    ok = TR.containment(spec, scan)
+    assert ok["fits"] and ok["ratio"] < TR.CONTAIN_REFUSE and ok["box_needed"] <= spec.box_cells
+    wide = TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0})
+    info = TR.containment(wide, scan)
+    assert not info["fits"] and info["box_needed"] > wide.box_cells and info["box_needed"] % 2 == 1
+    assert info["R_TF"] <= TR.CONTAIN_TARGET * TR.box_half_width(
+        TR.TrappedSpec(**{**QUICK, "box_cells": info["box_needed"]})
+    )
+    with pytest.raises(TR.UncontainedCloud, match=f"box_cells >= {info['box_needed']}"):
+        TR.trapped_ground_state(wide, scan=scan)
+    big, cont = TR.resolve_box(TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0, "containment": "enlarge"}), scan)
+    assert big.box_cells == info["box_needed"] and big.N_atoms == wide.N_atoms and big.nu_r_hz == wide.nu_r_hz
+    assert cont["fits"] and cont["action"].startswith("enlarged")
+    # the quick cloud is small (R_TF ~ 2 oscillator lengths): the Thomas-Fermi box is not enough, and "enlarge"
+    # grows the box again on the solved cloud's edge density until it is contained
+    run = TR.trapped_ground_state(TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0, "containment": "enlarge"}), scan=scan)
+    b = run["spec"].box_cells
+    assert b >= big.box_cells and run["grid"].N[0] == b * QUICK["cell_points"]
+    s = TR.summary(run, wide)  # the summary describes the box that ran, not the requested one
+    assert s["spec"]["box_cells"] == b and s["checks"]["contained"]
+    assert b == big.box_cells or "edge check" in s["containment"]["action"]
+    with pytest.warns(RuntimeWarning, match="too wide for its"):
+        same, _ = TR.resolve_box(TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0, "containment": "warn"}), scan)
+    assert same.box_cells == wide.box_cells
+    with pytest.raises(ValueError):
+        TR.resolve_box(TR.TrappedSpec(**{**QUICK, "containment": "maybe"}), scan)
+
+
+def test_checks():
+    c = TR.checks(1e-5, True, 1e-11)
+    assert c["ok"] and c["contained"] and c["converged"] and c["warnings"] == []
+    c = TR.checks(0.3, False, 1e-3)
+    assert not c["ok"] and not c["contained"] and not c["converged"] and len(c["warnings"]) == 2
+    assert TR.checks(TR.CONTAIN_EDGE, True)["contained"] is False  # the edge criterion is strict
+    # a complex64 solve at its rounding floor is not a failure; above the floor, or in complex128, it is
+    f = TR.checks(1e-5, False, 6e-5, "torch.complex64", "stall")
+    assert f["ok"] and f["at_precision_floor"] and not f["converged"] and f["warnings"] == []
+    assert not TR.checks(1e-5, False, 6e-5, "complex128", "stall")["ok"]
+    assert not TR.checks(1e-5, False, 3e-4, "complex64", "stall")["ok"]
+    assert not TR.checks(1e-5, False, 6e-5, "complex64", "max_steps")["ok"]  # still falling when it was cut
+
+
 def test_lda_cloud_uniform_envelope_and_tiling():
     rng = np.random.default_rng(1)
     c = rng.standard_normal((2, 8, 8)) + 1j * rng.standard_normal((2, 8, 8)) + 3.0
@@ -89,6 +173,8 @@ def test_quick_pipeline_insitu_observables(quick_run):
         assert np.isfinite(ins[k]), k
     assert ins["imaging_model"].startswith("coherent")
     assert s["ground"]["converged"] and s["cloud"]["N"] == pytest.approx(60.0)
+    assert s["checks"]["ok"] and s["containment"]["fits"] and s["containment"]["action"] == "none"
+    assert abs(ins["C_smooth"]) <= 1.0 and isinstance(ins["raw_ringing"], bool)
 
 
 def test_quick_pipeline_seed_independent(quick_run):

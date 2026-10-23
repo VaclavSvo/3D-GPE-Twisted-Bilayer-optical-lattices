@@ -8,10 +8,26 @@ trapped clouds behind a simulated Fig. 4 of Meng et al., Nature 615, 231 (2023):
   lda_cloud             the scan cells tiled under the LDA envelope, phase-aligned (q = 0 of component 1
                         real positive), in the engine's [ix, iy] layout
   add_noise             seeded 1 % real amplitude noise of 2 a correlation length
+  containment           the Thomas-Fermi radius of the LDA cloud in the infinite plane against the box
+  resolve_box           refuse (default), enlarge or only warn when the cloud is wider than its box
   trapped_ground_state  LDA start -> heavy-ball polish only (a Strang ladder would first move away from it)
   cloud_numbers         R_rms, central-cell nbar, atoms per tile, edge density
   insitu_observables    C_raw, C_psf, C_coh at s = 0 and s = 0.01, n_AA, n_AB (`imaging`; the central
                         cell is the AA cell at the origin)
+  checks                contained (edge density / peak < CONTAIN_EDGE) and converged, for every summary
+
+Containment. The box is periodic: a cloud wider than the box overlaps its own periodic images, and every
+observable then describes a lattice of overlapping clouds. Before the grid is allocated, `containment`
+solves the LDA in the infinite plane, N = (2 pi / (m omega_r^2)) int_E0^mu f(u) du, and compares the
+Thomas-Fermi radius R_TF = sqrt(2 (mu - E0) / m) / omega_r with the half-width of the box (the distance to
+the nearest edge). Above R_TF = CONTAIN_REFUSE x half-width the cloud's tail reaches the edge at more than
+~1e-3 of the peak; `resolve_box` then refuses the run (spec.containment = "refuse"), enlarges the box to the
+smallest odd size with R_TF <= CONTAIN_TARGET x half-width at the same N and nu_r ("enlarge"), or runs it with
+a warning ("warn"). CONTAIN_REFUSE = 0.88 is calibrated on the experiment's cloud (N = 2000, 20 Hz, m = 22):
+R_TF / half-width 0.847 gives edge 2.7e-4 (the validated 3 x 3 reference), 0.870 gives 1.4e-4, 0.912
+gives 7.9e-3, 0.937 gives 1.3e-2 and 1.0 gives 0.13. A small cloud (R_TF of a few a) has a relatively longer
+tail and can fail the edge test below that line; after the solve, `checks` applies the edge criterion of the
+trapped-cloud gate (edge density / peak < 1e-3) to every model, which catches it.
 
 Units: lattice units (a = 1, E_R = 1, hbar = 1); omega_r from Hz with units.lattice_units(). Fields are
 (B, C, Nx, Ny) torch tensors / (C, Nx, Ny) numpy arrays in grid order [ix, iy].
@@ -21,7 +37,8 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import asdict, dataclass
+import warnings
+from dataclasses import asdict, dataclass, replace
 
 import numpy as np
 import torch
@@ -39,6 +56,15 @@ from .physics import BilayerGPE
 
 FILLINGS = (0.5, 1.0, 1.5, 2.0, 3.0, 5.0)  # scan fillings (atoms per a^2)
 J_PROD = units.code_to_er(_P.J_PERP_CODE[0.243])  # 0.24277 E_R, the "0.243" reading of twisted_bilayer.config
+
+CONTAIN_EDGE = 1e-3  # edge density / peak at or above which a solved cloud counts as not contained
+CONTAIN_REFUSE = 0.88  # R_TF / box half-width above which resolve_box refuses (or enlarges): see the docstring
+CONTAIN_TARGET = 0.8  # R_TF / box half-width that an enlarged box (and the suggested box) satisfies
+CONTAINMENT_POLICIES = ("refuse", "enlarge", "warn")
+
+
+class UncontainedCloud(ValueError):
+    """The LDA cloud is wider than its periodic box (see the module docstring)."""
 
 
 @dataclass
@@ -63,6 +89,7 @@ class TrappedSpec:
     m: int = 22
     n: int = 1
     dtype: str = "complex128"  # of the trapped solve; the supercell scan always runs in complex128
+    containment: str = "refuse"  # "refuse" | "enlarge" | "warn": what resolve_box does with a too-wide cloud
 
     def couplings(self) -> tuple[float, float]:
         u = units.lattice_units(omega_z_hz=self.omega_z_hz)
@@ -149,10 +176,52 @@ class LDA:
         return np.clip(out, 0.0, None)
 
     def solve_mu(self, VT: np.ndarray, dA: float, N_atoms: float) -> float:
+        """mu with sum f(mu - VT) dA = N_atoms on the box grid, by bisection from [E0, E0 + 10]; the
+        upper end is doubled (from E0) until it holds N_atoms. Raises ValueError if 60 doublings do not
+        reach N_atoms (a box too small for the cloud at any mu)."""
         lo, hi = self.m[0], self.m[0] + 10.0
+        for _ in range(60):
+            if self(hi - VT).sum() * dA >= N_atoms:
+                break
+            hi = lo + 2.0 * (hi - lo)
+        else:
+            raise ValueError(f"LDA: N = {N_atoms:g} atoms not reached on this box for mu up to {hi:.3g} E_R")
         for _ in range(200):
             mid = 0.5 * (lo + hi)
             if self(mid - VT).sum() * dA < N_atoms:
+                lo = mid
+            else:
+                hi = mid
+        return 0.5 * (lo + hi)
+
+    def integral(self, mu: float) -> float:
+        """int_E0^mu f(u) du (atoms per a^2 times E_R): PCHIP inside the scan, linear above."""
+        m0, m1 = self.m[0], self.m[-1]
+        if mu <= m0:
+            return 0.0
+        out = float(self.ip.integrate(m0, min(mu, m1)))
+        if mu > m1:
+            d = mu - m1
+            out += self.f[-1] * d + 0.5 * self.slope * d * d
+        return out
+
+    def atoms_in_plane(self, mu: float, omega_r: float) -> float:
+        """N(mu) of the LDA cloud in the infinite plane (no box): with u = mu - (1/2) m omega_r^2 r^2,
+        N = int 2 pi r f(u) dr = (2 pi / (m omega_r^2)) int_E0^mu f(u) du."""
+        return 2.0 * math.pi / (units.M_LATTICE * omega_r**2) * self.integral(mu)
+
+    def solve_mu_plane(self, N_atoms: float, omega_r: float) -> float:
+        """mu with atoms_in_plane(mu) = N_atoms (bisection; the bracket is doubled from E0 as needed)."""
+        lo, hi = self.m[0], self.m[0] + 10.0
+        for _ in range(60):
+            if self.atoms_in_plane(hi, omega_r) >= N_atoms:
+                break
+            hi = lo + 2.0 * (hi - lo)
+        else:
+            raise ValueError(f"LDA: N = {N_atoms:g} atoms not reached for mu up to {hi:.3g} E_R")
+        for _ in range(200):
+            mid = 0.5 * (lo + hi)
+            if self.atoms_in_plane(mid, omega_r) < N_atoms:
                 lo = mid
             else:
                 hi = mid
@@ -211,13 +280,98 @@ def trap_grid(spec: TrappedSpec):
     return Grid((Nb, Nb), (Lb, Lb)), geo
 
 
+def box_half_width(spec: TrappedSpec) -> float:
+    """Distance from the cloud centre to the nearest edge of the periodic box (a)."""
+    return 0.5 * spec.box_cells * moire_geometry(spec.m, spec.n).L_box
+
+
+def containment(spec: TrappedSpec, scan: dict) -> dict:
+    """The LDA cloud of `spec` in the infinite plane against its box: mu_plane, R_TF (a), the box
+    half-width, ratio = R_TF / half-width, fits (ratio <= CONTAIN_REFUSE) and box_needed, the smallest odd
+    box_cells with ratio <= CONTAIN_TARGET at the same N_atoms and nu_r_hz."""
+    lda = LDA(scan["E0"], scan["fillings"], scan["mus"])
+    w = spec.omega_r()
+    mu = lda.solve_mu_plane(spec.N_atoms, w)
+    R = math.sqrt(2.0 * max(mu - scan["E0"], 0.0) / units.M_LATTICE) / w
+    half = box_half_width(spec)
+    L = moire_geometry(spec.m, spec.n).L_box
+    need = max(1, math.ceil(2.0 * R / (CONTAIN_TARGET * L)))
+    need += 1 - need % 2  # odd
+    return dict(
+        mu_plane=float(mu),
+        R_TF=float(R),
+        half_width=float(half),
+        ratio=float(R / half),
+        fits=bool(R <= CONTAIN_REFUSE * half),
+        box_cells=int(spec.box_cells),
+        box_needed=int(need),
+    )
+
+
+def resolve_box(spec: TrappedSpec, scan: dict) -> tuple[TrappedSpec, dict]:
+    """(spec, containment) with spec.containment applied: a cloud that fits is returned unchanged;
+    otherwise "refuse" raises UncontainedCloud, "enlarge" returns the spec on box_needed (same N_atoms
+    and nu_r_hz: the same physical cloud), "warn" warns and returns it unchanged."""
+    if spec.containment not in CONTAINMENT_POLICIES:
+        raise ValueError(f"containment must be one of {CONTAINMENT_POLICIES}, got {spec.containment!r}")
+    info = containment(spec, scan)
+    if info["fits"]:
+        return spec, dict(info, action="none")
+    msg = (
+        f"the LDA cloud (R_TF = {info['R_TF']:.1f} a) is too wide for its {spec.box_cells}x{spec.box_cells} box "
+        f"(half-width {info['half_width']:.1f} a, ratio {info['ratio']:.2f} > {CONTAIN_REFUSE:g}): its tail reaches "
+        f"the periodic images. box_cells >= {info['box_needed']} holds it (R_TF <= {CONTAIN_TARGET:g} x half-width)"
+    )
+    if spec.containment == "enlarge":
+        big = replace(spec, box_cells=info["box_needed"])
+        return big, dict(containment(big, scan), action=f"enlarged from {spec.box_cells}", box_requested=spec.box_cells)
+    if spec.containment == "warn":
+        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+        return spec, dict(info, action="warned")
+    raise UncontainedCloud(msg + '; or set containment="enlarge" (or "warn" to run it anyway)')
+
+
+ENLARGE_RETRIES = 2  # "enlarge": further +2 boxes when the solved cloud still fails the edge check
+
+
 def trapped_ground_state(spec: TrappedSpec, scan: dict | None = None, verbose: bool = False) -> dict:
     """LDA start (+ seeded noise) -> heavy-ball polish (ground_state.precondition_polish via relax
-    with an empty dt ladder) to spec.tol. Returns dict(engine, psi (1, 2, Nb, Nb) tensor, result
-    (RelaxResult), lda (mu_lda, f_centre, R_lda, E_per_N and mu of the start), scan, seconds)."""
+    with an empty dt ladder) to spec.tol. The box is first checked against the cloud (`resolve_box`);
+    with containment="enlarge" a solved cloud whose edge density is still >= CONTAIN_EDGE (a cloud too small
+    for the Thomas-Fermi estimate, R_TF of a few oscillator lengths) is solved again two boxes larger, up to
+    ENLARGE_RETRIES times. Returns dict(engine, psi (1, 2, Nb, Nb) tensor, result (RelaxResult), lda (mu_lda,
+    f_centre, R_lda, E_per_N and mu of the start), scan, seconds, spec (the spec actually run: box_cells may
+    have been enlarged), containment)."""
     t0 = time.perf_counter()
     if scan is None:
         scan = supercell_scan(spec, verbose=verbose)
+    requested = spec.box_cells
+    spec, cont = resolve_box(spec, scan)
+    if verbose:
+        print(
+            f"  containment: R_TF = {cont['R_TF']:.2f} a in the plane, box half-width {cont['half_width']:.2f} a "
+            f"(ratio {cont['ratio']:.3f}; {cont['action']})",
+            flush=True,
+        )
+    for attempt in range(ENLARGE_RETRIES + 1):
+        run = _solve_on_box(spec, scan, verbose)
+        edge = cloud_numbers(run["engine"], run["psi"], run["geometry"].L_box)["edge_density_rel"]
+        if spec.containment != "enlarge" or edge < CONTAIN_EDGE or attempt == ENLARGE_RETRIES:
+            break
+        if verbose:
+            print(
+                f"  edge density {edge:.1e} >= {CONTAIN_EDGE:g} on box {spec.box_cells}: enlarging to "
+                f"{spec.box_cells + 2}",
+                flush=True,
+            )
+        spec = replace(spec, box_cells=spec.box_cells + 2)
+        cont = dict(containment(spec, scan), action=f"enlarged from {requested} (edge check)", box_requested=requested)
+    run.update(seconds=time.perf_counter() - t0, spec=spec, containment=cont)
+    return run
+
+
+def _solve_on_box(spec: TrappedSpec, scan: dict, verbose: bool) -> dict:
+    """The LDA start and the polish of `trapped_ground_state` on spec's box."""
     grid, geo = trap_grid(spec)
     w = spec.omega_r()
     VT = harmonic_trap(grid, (w, w))
@@ -261,7 +415,6 @@ def trapped_ground_state(spec: TrappedSpec, scan: dict | None = None, verbose: b
         scan=scan,
         grid=grid,
         geometry=geo,
-        seconds=time.perf_counter() - t0,
         polish_seconds=time.perf_counter() - tp,
         psi_lda=psi_lda,
     )
@@ -323,7 +476,8 @@ def cloud_numbers_from_density(n1: np.ndarray, n2: np.ndarray, grid: Grid, L_cel
 def insitu_observables(eng: BilayerGPE, psi: torch.Tensor, s_sat: float = 0.01, mn: tuple = (22, 1)) -> dict:
     """The in-situ contrasts of |2> (`imaging.standard_observables`): C_raw (|k| < pi/a envelope,
     AA/AB), C_raw_central, C_psf / C_img_central (legacy Gaussian PSF), C_coh / C_coh_img (coherent
-    imaging at s_sat), C_coh_infocus (s = 0), n_AA, n_AB."""
+    imaging at s_sat), C_coh_infocus (s = 0), n_AA, n_AB, C_smooth (the ringing-free envelope) and
+    raw_ringing (True when the raw envelope is negative at AA or AB, so C_raw is not a contrast)."""
     n = to_numpy(psi[0].real ** 2 + psi[0].imag ** 2).astype(np.float64)
     return insitu_from_density(n[0], n[1], eng.grid.dx[0], s_sat=s_sat, mn=mn)
 
@@ -347,12 +501,56 @@ def insitu_from_density(n1: np.ndarray, n2: np.ndarray, dx: float, s_sat: float 
         n_AA=coh["n_AA"],
         n_AB=coh["n_AB"],
         sign_AA_minus_AB=float(np.sign(coh["S_raw_AA"] - coh["S_raw_AB"])),
+        C_smooth=coh["C_smooth"],
+        raw_ringing=bool(coh["raw_ringing"]),
+        S_raw_AB=coh["S_raw_AB"],
     )
 
 
+COMPLEX64_FLOOR = 1e-4  # E_R: a single-precision solve that stops below this residual is at its floor, not stuck
+
+
+def checks(
+    edge_density_rel: float,
+    converged: bool,
+    residual: float | None = None,
+    dtype: str | None = None,
+    stop_reason: str | None = None,
+) -> dict:
+    """The two conditions under which a trapped run describes one converged cloud: contained (edge
+    density / peak < CONTAIN_EDGE, the trapped-cloud gate's criterion) and converged (residual below the
+    run's tol). A complex64 solve cannot reach a tol below its rounding floor (it stops at 1e-5 ... 6e-5 E_R
+    on these clouds): with dtype "complex64", a residual below COMPLEX64_FLOOR and a solve that ended on a
+    stall (stop_reason "stall" or "tau_floor", not "max_steps" while still falling) it counts as converged to
+    that floor (`at_precision_floor`, noted, not a failure). ok = contained and (converged or at the floor);
+    warnings lists what failed, for reports."""
+    contained = bool(edge_density_rel < CONTAIN_EDGE)
+    floor = bool(
+        not converged
+        and dtype is not None
+        and "64" in str(dtype)
+        and "128" not in str(dtype)
+        and residual is not None
+        and residual < COMPLEX64_FLOOR
+        and stop_reason in ("stall", "tau_floor")
+    )
+    ok = contained and (bool(converged) or floor)
+    out = dict(contained=contained, converged=bool(converged), at_precision_floor=floor, ok=ok, warnings=[])
+    if not contained:
+        out["warnings"].append(
+            f"NOT CONTAINED: edge density / peak = {edge_density_rel:.1e} >= {CONTAIN_EDGE:g}; the cloud overlaps its "
+            "periodic images and its observables do not describe one trapped cloud"
+        )
+    if not converged and not floor:
+        res = "" if residual is None else f" (residual {residual:.1e})"
+        out["warnings"].append(f"NOT CONVERGED{res}: the solve stopped above its tol")
+    return out
+
+
 def summary(run: dict, spec: TrappedSpec, s_sat: float = 0.01) -> dict:
-    """Everything a trapped run reports (JSON-ready): spec, scan numbers, LDA start, polish,
-    cloud numbers, in-situ contrasts."""
+    """Everything a trapped run reports (JSON-ready): spec (the one actually run, `run["spec"]`), scan
+    numbers, containment, LDA start, polish, cloud numbers, in-situ contrasts, checks."""
+    spec = run.get("spec", spec)
     eng, psi, r = run["engine"], run["psi"], run["result"]
     geo = run["geometry"]
     terms = eng.energy_terms(psi)
@@ -373,14 +571,20 @@ def summary(run: dict, spec: TrappedSpec, s_sat: float = 0.01) -> dict:
             residual=float(r.residual[0]),
             converged=bool(r.converged[0]),
             steps=int(r.steps),
+            stop_reason=r.stop_reason,
             polish_seconds=run["polish_seconds"],
             total_seconds=run["seconds"],
         ),
         cloud=cloud_numbers(eng, psi, geo.L_box),
+        containment=run.get("containment"),
     )
     mn = (spec.m, spec.n)
     out["insitu"] = insitu_observables(eng, psi, s_sat=s_sat, mn=mn)
     lda_psi = run["psi_lda"]
     out["lda"]["insitu"] = insitu_observables(eng, renormalise(eng, lda_psi, spec.N_atoms), s_sat=s_sat, mn=mn)
     out["lda"]["cloud"] = cloud_numbers(eng, lda_psi, geo.L_box)
+    g = out["ground"]
+    out["checks"] = checks(
+        out["cloud"]["edge_density_rel"], g["converged"], g["residual"], spec.dtype, g["stop_reason"]
+    )
     return out

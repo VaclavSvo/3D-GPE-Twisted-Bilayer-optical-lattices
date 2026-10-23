@@ -46,13 +46,14 @@ class RelaxResult:
     converged: torch.Tensor  # (B,) bool
     steps: int = 0
     stages: list = field(default_factory=list)  # (dt, steps, max residual) per stage
+    stop_reason: str = ""  # why the last stage ended: "tol", "stall", "max_steps", "tau_floor" or "ladder"
 
     def report(self) -> str:
         lines = [f"  stage dt={dt:.3g}: {n} steps, max residual {r:.2e}" for dt, n, r in self.stages]
         ok = int(self.converged.sum())
         lines.append(
             f"  {ok}/{len(self.converged)} converged, {self.steps} steps total, "
-            f"residual max {float(self.residual.max()):.2e}"
+            f"residual max {float(self.residual.max()):.2e}, stopped on {self.stop_reason or '-'}"
         )
         return "\n".join(lines)
 
@@ -173,10 +174,12 @@ def relax(
     polish_tau: float = 0.5,
     polish_beta: float = 0.9,
     polish_alpha: float | None = None,
+    polish_stall_windows: int | None = None,
     verbose: bool = False,
 ) -> RelaxResult:
     """Ground state: imaginary-time dt ladder, then the preconditioned
-    momentum polish, both on the residual criterion.
+    momentum polish, both on the residual criterion (polish_stall_windows:
+    see `precondition_polish`; stop_reason records why it ended).
 
     Each ladder stage runs until every batch member has residual < tol, or
     the max residual has improved by less than (1 - stall_ratio) over one
@@ -216,7 +219,9 @@ def relax(
             )
         if float(res.max()) < tol:
             break
+    stop = "tol" if float(res.max()) < tol else "ladder"
     if float(res.max()) >= tol and polish_steps > 0:
+        info: dict = {}
         psi, res, n_pol = precondition_polish(
             engine,
             psi,
@@ -227,14 +232,30 @@ def relax(
             beta=polish_beta,
             alpha=polish_alpha,
             check_every=check_every,
+            stall_windows=polish_stall_windows,
+            info=info,
             verbose=verbose,
         )
         total += n_pol
         stages.append((0.0, n_pol, float(res.max())))
+        stop = info.get("stop_reason", "")
     terms = engine.energy_terms(psi)
     return RelaxResult(
-        psi=psi, residual=res, mu=terms["mu"], energy=terms["E_total"], converged=res < tol, steps=total, stages=stages
+        psi=psi,
+        residual=res,
+        mu=terms["mu"],
+        energy=terms["E_total"],
+        converged=res < tol,
+        steps=total,
+        stages=stages,
+        stop_reason=stop,
     )
+
+
+def _stalled(hist: list, windows: int) -> bool:
+    """True when the last residual is above 0.995 x the one `windows` check windows earlier: the residual
+    fell by less than 0.5 % over that span (windows = 1: the one-window test)."""
+    return len(hist) > windows and hist[-1] > 0.995 * hist[-1 - windows]
 
 
 def precondition_polish(
@@ -247,6 +268,8 @@ def precondition_polish(
     beta: float = 0.9,
     alpha: float | None = None,
     check_every: int = 50,
+    stall_windows: int | None = None,
+    info: dict | None = None,
     verbose: bool = False,
 ):
     """Preconditioned gradient descent with momentum (heavy ball) on E[psi]
@@ -261,17 +284,31 @@ def precondition_polish(
     rate ~ tau E/alpha per step without it, ~ sqrt of that with it. When the
     residual rises between two checks the momentum is reset and tau is
     reduced (never below 1e-3 tau_0); the run stops at tol, at max_steps, or
-    when the residual has stopped falling (< 0.5% per window)."""
+    when the residual has stopped falling: by less than 0.5 % over the last
+    `stall_windows` check windows (since the last restart). stall_windows = 1
+    is the one-window test, which also ends a slow but steady descent (soft modes
+    of a large cloud fall by ~0.1-0.3 % per window); with 4 a descent faster than
+    ~0.13 % per window goes on. Default (None): 4 for a complex128 engine, 1 for
+    a single-precision one, which stops at its rounding floor where a longer
+    window only costs steps (so every complex64 solve, and the complex64 first
+    stage of a two-precision solve, is unchanged by the longer window).
+    A passed `info` dict receives stop_reason ("tol", "stall", "max_steps",
+    "tau_floor")."""
     g = engine.grid
     if alpha is None:
         alpha = max(local_energy_scale(engine, psi), 1e-3)
     P = (1.0 / (engine.kappa * engine.ksq() + alpha)).to(engine.dtype)
     res = engine.residual(psi)
     prev = float(res.max())
+    hist = [prev]  # window residuals since the last restart
+    if stall_windows is None:
+        stall_windows = 4 if engine.dtype == torch.complex128 else 1
+    stall_windows = max(1, int(stall_windows))
     tau0 = tau
     v = torch.zeros_like(psi)
     psi_best, res_best = psi, res
     n = 0
+    reason = "max_steps"
     while n < max_steps:
         for _ in range(check_every):
             terms = engine.energy_terms(psi)
@@ -287,16 +324,23 @@ def precondition_polish(
         if cur < float(res_best.max()):
             psi_best, res_best = psi, res
         if cur < tol:
+            reason = "tol"
             break
         if cur > prev:  # overshoot: restart from the best state
             psi, res = psi_best, res_best
             v = torch.zeros_like(psi)
             tau *= 0.5
             if tau < 1e-3 * tau0:
+                reason = "tau_floor"
                 break
             prev = float(res.max())
+            hist = [prev]
             continue
-        if cur > 0.995 * prev:
+        hist.append(cur)
+        if _stalled(hist, stall_windows):
+            reason = "stall"
             break
         prev = cur
+    if info is not None:
+        info["stop_reason"] = reason
     return psi_best, res_best, n

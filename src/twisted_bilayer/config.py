@@ -40,7 +40,9 @@ NU_Z_HZ = 1000.0                      # vertical trap frequency (Hz; the paper: 
 # The paper's fitted in-lattice Rabi frequency is Omega_R = 2 pi x 893 Hz (Fig. 3c; fit form not given).
 # Three readings of it, in code units (energy unit hbar^2 / (m a^2) = E_R / 4.934802), keyed by their E_R labels:
 #   0.121  the Rabi fit read as sin^2(Omega t / 2): J_perp = Omega_R / 2
-#   0.150  the same divided by the Franck-Condon factor 0.82
+#   0.150  0.150 E_R (0.7404 = 0.15004 E_R): the 0.121 reading divided by the lowest-band Franck-Condon
+#          factor <F> = 0.8205 is 0.1479 E_R (which gives 2 <F> J_perp / h = 893 Hz), rounded up to 0.150:
+#          2 <F> J_perp / h = 906 Hz, 1.4 % above 893 Hz
 #   0.243  the paper-literal Omega_R
 J_PERP_CODE = {0.121: 0.599, 0.150: 0.7404, 0.243: 1.19802}
 

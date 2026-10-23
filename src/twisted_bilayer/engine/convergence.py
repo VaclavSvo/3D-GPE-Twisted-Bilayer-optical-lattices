@@ -15,7 +15,11 @@ exponentially, faster in shallow lattices. The superfluid fraction is the most s
 an energy difference of order theta^2 / L^2 (see `engine.observables`).
 
 `needed` reports, per observable, the coarsest resolution whose difference from the finest is below a
-tolerance (absolute, in the observable's units), and checks that every finer resolution also is.
+tolerance (absolute, in the observable's units), and checks that every finer resolution also is. Only
+converged rows count: a row whose solve stopped above its residual tolerance (`converged` False) ends the
+walk, because an unconverged state can land near the finest value by chance; if the finest row itself is
+unconverged nothing is reported as needed. Rows without a `converged` entry (records written before it
+existed) count as converged.
 """
 
 from __future__ import annotations
@@ -102,6 +106,7 @@ def supercell_convergence(
                 ppa_actual=res.N_grid / res.geometry.L_box,
                 seconds=sec,
                 residual=float(np.max(res.columns["residual_0"])),
+                converged=bool(np.all(res.columns["converged"])),
                 values={k: np.asarray(res.columns[k], dtype=float) for k in SUPERCELL_KEYS},
             )
             rows.append(row)
@@ -112,7 +117,9 @@ def supercell_convergence(
                     flush=True,
                 )
         out[float(V0)] = rows
-    return dict(rows=out, Omega_R=tuple(float(o) for o in Omega_R), m=m, n=n, filling=filling, vertical=vertical)
+    return dict(
+        rows=out, Omega_R=tuple(float(o) for o in Omega_R), m=m, n=n, filling=filling, vertical=vertical, tol=tol
+    )
 
 
 def trapped_convergence(spec: TR.TrappedSpec, cell_points_list, verbose: bool = False) -> dict:
@@ -147,7 +154,10 @@ def trapped_convergence(spec: TR.TrappedSpec, cell_points_list, verbose: bool = 
                 N=int(run["grid"].N[0]),
                 seconds=sec,
                 residual=float(r.residual[0]),
+                converged=bool(r.converged[0]),
                 steps=int(r.steps),
+                box_cells=int(run["spec"].box_cells),
+                edge_density_rel=float(cloud["edge_density_rel"]),
                 values=values,
             )
         )
@@ -175,21 +185,44 @@ def differences(rows, keys) -> list[dict]:
     return [{k: _maxabs(np.asarray(r["values"][k]) - np.asarray(fin[k])) for k in keys} for r in rows]
 
 
+def _converged(row) -> bool:
+    return bool(row.get("converged", True))
+
+
 def needed(rows, keys, res_key: str, tolerances: dict | None = None) -> dict:
-    """Per key: the coarsest resolution (rows[i][res_key]) from which every finer one is within the tolerance
-    of the finest; None if only the finest itself qualifies (not converged within the scan)."""
+    """Per key: the coarsest resolution (rows[i][res_key]) from which every finer one is converged and
+    within the tolerance of the finest; None if only the finest itself qualifies (not converged within the
+    scan) or the finest row is not converged."""
     tol = dict(TOLERANCES, **(tolerances or {}))
     diffs = differences(rows, keys)
     out = {}
     for k in keys:
         ok_from = None
-        for i in range(len(rows) - 2, -1, -1):  # walk down from the second finest
-            if diffs[i][k] <= tol[k]:
-                ok_from = rows[i][res_key]
-            else:
-                break
+        if _converged(rows[-1]):
+            for i in range(len(rows) - 2, -1, -1):  # walk down from the second finest
+                if _converged(rows[i]) and diffs[i][k] <= tol[k]:
+                    ok_from = rows[i][res_key]
+                else:
+                    break
         out[k] = ok_from
     return out
+
+
+def unconverged(rows, res_key: str) -> list:
+    """The resolutions of the rows whose solve stopped above its residual tolerance."""
+    return [r[res_key] for r in rows if not _converged(r)]
+
+
+def _needed_text(rows, nd, k, res_key: str, fmt=str) -> str:
+    """'<resolution>' if found; otherwise why not: '> <second finest>' when an observable is not converged in
+    resolution, 'blocked by an unconverged row at <r>' when the walk stopped at an unconverged row."""
+    if nd[k] is not None:
+        return fmt(nd[k])
+    if not _converged(rows[-1]):
+        return f"none (the finest row, {fmt(rows[-1][res_key])}, is not converged)"
+    if len(rows) > 1 and not _converged(rows[-2]):
+        return f"blocked by an unconverged row at {fmt(rows[-2][res_key])}"
+    return ">" + fmt(rows[-2][res_key]) if len(rows) > 1 else "-"
 
 
 def to_record(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | None = None) -> dict:
@@ -203,12 +236,14 @@ def to_record(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | Non
             n=conv_sc["n"],
             filling=conv_sc["filling"],
             vertical=conv_sc["vertical"],
+            tol=conv_sc.get("tol"),
             Omega_R=list(conv_sc["Omega_R"]),
             by_V0={
                 f"{V0:g}": dict(
                     rows=[dict(r, values={k: np.asarray(v).tolist() for k, v in r["values"].items()}) for r in rows],
                     diff_from_finest=differences(rows, SUPERCELL_KEYS),
                     needed_ppa=needed(rows, SUPERCELL_KEYS, "ppa", tolerances),
+                    unconverged_ppa=unconverged(rows, "ppa"),
                 )
                 for V0, rows in conv_sc["rows"].items()
             },
@@ -220,6 +255,7 @@ def to_record(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | Non
             rows=rows,
             diff_from_finest=differences(rows, TRAPPED_KEYS),
             needed_cell_points=needed(rows, TRAPPED_KEYS, "cell_points", tolerances),
+            unconverged_cell_points=unconverged(rows, "cell_points"),
         )
     return out
 
@@ -264,21 +300,21 @@ def report(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | None =
                     f"  {r['ppa_actual']:>7.2f}{r['N']:>6d}"
                     + "".join(f"{d[k]:>{_W}.1e}" for k in SUPERCELL_KEYS)
                     + f"{r['seconds']:>6.0f}"
+                    + ("" if _converged(r) else f"  NOT CONVERGED (residual {r['residual']:.1e})")
                 )
             nd = needed(rows, SUPERCELL_KEYS, "ppa", tolerances)
+            if not _converged(rows[-1]):
+                lines.append("  the finest row is not converged: no resolution is reported as needed")
             lines.append(
                 "  needed (pts/a, nominal): "
-                + ", ".join(
-                    f"{k} {nd[k] if nd[k] is not None else '>' + format(rows[-2]['ppa'], 'g')}" for k in SUPERCELL_KEYS
-                )
+                + ", ".join(f"{k} {_needed_text(rows, nd, k, 'ppa', lambda v: format(v, 'g'))}" for k in SUPERCELL_KEYS)
             )
     if conv_tr:
         rows = conv_tr["rows"]
         diffs = differences(rows, TRAPPED_KEYS)
         s = conv_tr["spec"]
-        lines.append(
-            f"trapped cloud: box {s.box_cells}x{s.box_cells}, N = {s.N_atoms:g}, nu_r = {s.nu_r_hz:g} Hz, NPSE; |value - finest|"
-        )
+        b = rows[-1].get("box_cells", s.box_cells)
+        lines.append(f"trapped cloud: box {b}x{b}, N = {s.N_atoms:g}, nu_r = {s.nu_r_hz:g} Hz, NPSE; |value - finest|")
         lines.append(
             f"  {'cell':>6s}{'pts/a':>7s}{'N':>6s}" + "".join(f"{k:>11s}" for k in TRAPPED_KEYS) + f"{'s':>6s}"
         )
@@ -287,15 +323,16 @@ def report(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | None =
                 f"  {r['cell_points']:>6d}{r['ppa']:>7.2f}{r['N']:>6d}"
                 + "".join(f"{d[k]:>11.1e}" for k in TRAPPED_KEYS)
                 + f"{r['seconds']:>6.0f}"
+                + ("" if _converged(r) else f"  NOT CONVERGED (residual {r['residual']:.1e})")
             )
+        if not _converged(rows[-1]):
+            lines.append("  the finest row is not converged: no resolution is reported as needed")
         fin = rows[-1]["values"]
         lines.append("  finest: " + ", ".join(f"{k} {fin[k]:.8g}" for k in TRAPPED_KEYS))
         nd = needed(rows, TRAPPED_KEYS, "cell_points", tolerances)
         lines.append(
             "  needed (points per supercell): "
-            + ", ".join(
-                f"{k} {nd[k] if nd[k] is not None else '>' + str(rows[-2]['cell_points'])}" for k in TRAPPED_KEYS
-            )
+            + ", ".join(f"{k} {_needed_text(rows, nd, k, 'cell_points')}" for k in TRAPPED_KEYS)
         )
     lines.append("  tolerances: " + ", ".join(f"{k} {v:g}" for k, v in tol.items()))
     return "\n".join(lines)

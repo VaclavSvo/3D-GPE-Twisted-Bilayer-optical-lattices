@@ -90,6 +90,22 @@ def _norms(X: torch.Tensor) -> torch.Tensor:
     return torch.sqrt((X.reshape(X.shape[0], -1).abs() ** 2).sum(dim=1))
 
 
+def _independent(Z: torch.Tensor, rtol: float = 1e-8) -> torch.Tensor:
+    """The vectors of the block Z (z, ...) that are not (to rtol of their norm) combinations of the ones
+    kept before them, in order and unchanged: a dependent zero-mode candidate would make the projection's
+    Gram matrices singular."""
+    keep = []
+    for i in range(Z.shape[0]):
+        v = Z[i : i + 1]
+        r = v
+        if keep:
+            Q = torch.cat(keep)
+            r = v - _comb(Q, torch.linalg.solve(_gram(Q, Q), _gram(Q, v)))
+        if float(_norms(r)[0]) > rtol * float(_norms(v)[0]):
+            keep.append(v)
+    return torch.cat(keep)
+
+
 def _orth_against(Q, AQ, X, AX):
     """X - Q (Q^H X) (Q orthonormal), twice for stability; the operator image
     AX is carried along."""
@@ -328,9 +344,6 @@ class BdG:
 
         # local terms
         self.mean_field, self.gprime = _mean_field_and_kernel(engine, self.n)
-        if mu is None:
-            mu = float(engine.energy_terms(self.psi0.to(engine.dtype))["mu"][0])
-        self.mu = float(mu)
         V = engine.V
         loc = torch.zeros((1, self.C) + g.N, dtype=self.rdtype, device=self.device)
         if V is not None:
@@ -346,6 +359,14 @@ class BdG:
             self.Omega_R = float(om) if not torch.is_tensor(om) else float(om.reshape(-1)[0])
         else:
             self.Omega_R = 0.0
+        if mu is None and engine.dtype == torch.complex128:
+            mu = float(engine.energy_terms(self.psi0.to(engine.dtype))["mu"][0])
+        elif mu is None:
+            # mu = <psi0| H_GP |psi0> / <psi0|psi0> from this operator's float64 blocks, so that it does not
+            # inherit a single-precision engine's rounding of mu (its V and parameters are what they are)
+            self.loc = loc
+            mu = float((self.psi0 * self._D_gamma(self.psi0)).sum() / (self.psi0 * self.psi0).sum())
+        self.mu = float(mu)
         self.loc = loc - self.mu
         self.gpsi0 = None if self.gprime is None else self.gprime * self.psi0
 
@@ -442,7 +463,9 @@ class BdG:
     # -- zero modes ------------------------------------------------------------------------
     def zero_modes(self):
         """At q = 0: (Z, P) with Z (z, C, *N) the Goldstone h-vectors (psi0, and
-        (psi1, -psi2) when C = 2 and Omega_R = 0) and P = A^{-1} Z. None at q != 0."""
+        (psi1, -psi2) when C = 2 and Omega_R = 0) and P = A^{-1} Z. None at q != 0.
+        The set is reduced to its independent directions (`_independent`): with one
+        component empty, (psi1, -psi2) = -psi0 and there is one Goldstone mode, not two."""
         if not self.at_gamma:
             return None
         if self._zero is None:
@@ -454,7 +477,7 @@ class BdG:
                         (1, 2) + (1,) * self.grid.d
                     )
                 )
-            Z = torch.cat(Z).to(self.block_dtype)
+            Z = _independent(torch.cat(Z)).to(self.block_dtype)
             P, _ = _cg(self.apply_A, Z, self.preconditioner(self.default_shift()))
             self._zero = (Z, P)
         return self._zero

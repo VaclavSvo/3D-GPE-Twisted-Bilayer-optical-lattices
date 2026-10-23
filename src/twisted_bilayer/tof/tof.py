@@ -82,17 +82,38 @@ def talbot_time(period):
     return period**2 / math.pi
 
 
-def g_of_t(t, g2D, omega_z):
-    """g2D(t) = g2D / sqrt(1 + omega_z^2 t^2) (vertical Gaussian expansion)."""
-    return g2D / np.sqrt(1.0 + (omega_z * np.asarray(t, float)) ** 2)
+def g_of_t(t, g2D, omega_z, s0=1.0):
+    """The in-plane coupling of a pancake released at t = 0 from a Gaussian of width s0 l_z
+    (g2D = g3D / (sqrt(2 pi) l_z), the coupling of the bare oscillator width): the free Gaussian
+    widens as sigma(t)^2 = sigma0^2 (1 + (omega_z t / s0^2)^2), so
+        g(t) = g2D / (s0 sqrt(1 + (omega_z t / s0^2)^2)).
+    s0 = 1 (default) is the release from the oscillator ground state, g2D / sqrt(1 + omega_z^2 t^2); an
+    NPSE in-situ state has s0 = s(n) > 1 (`npse_release_width`). The interaction-driven part of the
+    vertical expansion is neglected either way."""
+    s0 = float(s0)
+    return g2D / (s0 * np.sqrt(1.0 + (omega_z * np.asarray(t, float) / (s0 * s0)) ** 2))
 
 
-def g_integral(t, g2D, omega_z):
-    """int_0^t g2D(t') dt' = g2D asinh(omega_z t)/omega_z."""
+def g_integral(t, g2D, omega_z, s0=1.0):
+    """int_0^t g(t') dt' of `g_of_t` = g2D s0 asinh(omega_z t / s0^2) / omega_z."""
     t = np.asarray(t, float)
+    s0 = float(s0)
     if omega_z == 0:
-        return g2D * t
-    return g2D * np.arcsinh(omega_z * t) / omega_z
+        return g2D * t / s0
+    return g2D * s0 * np.arcsinh(omega_z * t / (s0 * s0)) / omega_z
+
+
+def npse_release_width(n, g2D, omega_z) -> float:
+    """The NPSE width s(n) (root of s^4 - x s - 1 = 0, x = g2D n / omega_z; see engine.npse) of a
+    density n (atoms per a^2, any shape), averaged with the interaction weight n^2: the s0 of `g_of_t`
+    for releasing that state with one cloud-wide width. Units: any with hbar = 1 (x is dimensionless)."""
+    n = np.asarray(n, float)
+    x = (float(g2D) / float(omega_z)) * n
+    s = np.maximum(np.abs(x) ** (1.0 / 3.0), 1.0)
+    for _ in range(8):
+        s = s - (s**4 - x * s - 1.0) / (4.0 * s**3 - x)
+    w = n * n
+    return float((s * w).sum() / w.sum()) if w.sum() > 0 else 1.0
 
 
 def kinetic_phase_per_step(dt, dx, dy, Nx, Ny):
@@ -559,11 +580,11 @@ def _sep_phase(B, like, ax, ay):
     return ex[None, None, :], ey[None, :, None]
 
 
-def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5):
+def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5, s0=1.0):
     """i d_t phi = [-1/2 lap + g(t) sum_c |phi_c|^2] phi on a periodic box,
     Strang splitting with merged kinetic half-steps; the time integral of g
-    over each potential sub-step is exact. Step size: int g/g2D dt <= dphi,
-    dt <= dt_max. Returns (phi, n_steps)."""
+    over each potential sub-step is exact (g of `g_of_t` with release width s0). Step size:
+    int g/g2D dt <= dphi (at s0 = 1), dt <= dt_max. Returns (phi, n_steps)."""
     B = _bk(phi)
     nc, Ny, Nx = phi.shape
     kx, ky = _kvec(Nx, dx), _kvec(Ny, dy)
@@ -576,7 +597,7 @@ def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5):
         ts.append(t + h)
     ts = np.array(ts)
     hs = np.diff(ts)
-    Phi = np.diff(g_integral(ts, g2D, omega_z))
+    Phi = np.diff(g_integral(ts, g2D, omega_z, s0))
     pk = B.fft2(phi)
     # first half kick
     ex, ey = _sep_phase(B, phi, 0.25 * hs[0] * kx**2, 0.25 * hs[0] * ky**2)
@@ -606,8 +627,10 @@ def propagate_orders(
     dphi=0.05,
     dt_max=2.0,
     phase_tol=0.02,
+    s0=1.0,
 ):
-    """Propagate every envelope from orders.t to t_end (time since release).
+    """Propagate every envelope from orders.t to t_end (time since release); s0: the release width of
+    the mean-field tail's g(t) (`g_of_t`).
 
     Linear (default, g2D=None): exact free propagation of each order,
         chi_G(r, t_end) = e^{-i|G|^2 tau/2} phi_G^free(r - G tau, tau),
@@ -645,7 +668,7 @@ def propagate_orders(
         use_nls = False
         if g2D is not None and g2D > 0 and tau > 0:
             nmax_dens = float(B.to_numpy(B.abs2(phi).sum(0)).max())
-            phase = (g_integral(orders.t + tau, g2D, omega_z) - g_integral(orders.t, g2D, omega_z)) * nmax_dens
+            phase = (g_integral(orders.t + tau, g2D, omega_z, s0) - g_integral(orders.t, g2D, omega_z, s0)) * nmax_dens
             use_nls = phase > phase_tol
         lost = 0.0
         if not periodic:
@@ -670,7 +693,9 @@ def propagate_orders(
             fx, fy = d[0] - nx * dx, d[1] - ny * dy
         nsteps = 0
         if use_nls:
-            phi, nsteps = _nls_comoving(phi, dx, dy, orders.t, orders.t + tau, g2D, omega_z, dphi=dphi, dt_max=dt_max)
+            phi, nsteps = _nls_comoving(
+                phi, dx, dy, orders.t, orders.t + tau, g2D, omega_z, dphi=dphi, dt_max=dt_max, s0=s0
+            )
             ax, ay = kx * fx, ky * fy
         else:
             ax, ay = 0.5 * tau * kx**2 + kx * fx, 0.5 * tau * ky**2 + ky * fy
@@ -716,11 +741,17 @@ def meanfield_stage(
     phase_max=MF_PHASE_MAX,
     dt_check="raise",
     highk_frac=0.75,
+    s0=1.0,
 ):
     """Nonlinear 2D expansion of the full field for 0 <= t <= t1 (lattice off):
 
         i d_t psi_c = [-1/2 lap + g(t) n] psi_c + J_perp psi_{c'},
-        n = sum_c |psi_c|^2,  g(t) = g2D / sqrt(1 + omega_z^2 t^2).
+        n = sum_c |psi_c|^2,  g(t) = g2D / (s0 sqrt(1 + (omega_z t / s0^2)^2))   (`g_of_t`).
+
+    s0 : the vertical width at release in units of l_z: 1 (default) for a state with the oscillator's
+          width (fixed g2D), the cloud's NPSE width for an NPSE state (`npse_release_width`; the
+          dense pockets have s0 = 1.04 at n = 3, 1.15 at n = 11.6, and the s0 = 1 coupling is then
+          off by a factor s0 at t = 0 and by 1/s0 late).
 
     psi : (Ny,Nx) or (ncomp,Ny,Nx) (numpy or torch). With two components
           (psi1, psi2) both expand and interact (SU(2) g); J_perp couples
@@ -744,7 +775,9 @@ def meanfield_stage(
     Returns MFResult(psi(t1), dx, dy, origin, t1, diag) with diag holding
     t_K (all step boundaries), t_T, T (kinetic energy at the boundaries, every
     `record_every` steps and at the end), t_V, I = int n^2 (at every potential
-    sub-step), norm, box, steps. Complex64 input runs in single precision.
+    sub-step), norm, box, steps. Precision: a torch complex64 input runs in single precision; a numpy
+    complex64 input comes back complex128 (the float64 phase arrays promote it), which costs speed and
+    memory, not accuracy.
     """
     is_torch = isinstance(psi, _torch.Tensor)
     p, was2d = _as_stack(psi)
@@ -817,7 +850,8 @@ def meanfield_stage(
     Kfull = B.asarray(np.exp(-0.5j * h * k2), p)[None]
     Khalf = B.asarray(np.exp(-0.25j * h * k2), p)[None]
     ts = h * np.arange(nsteps + 1)
-    Phi = np.diff(g_integral(ts, g2D, omega_z))
+    Phi = np.diff(g_integral(ts, g2D, omega_z, s0))
+    diag["s0"] = float(s0)
     cJ, sJ = math.cos(J_perp * h), math.sin(J_perp * h)
     dA = dx * dy
     NN = Nx * Ny
@@ -870,7 +904,7 @@ def released_kinetic_energy(diag, g2D, omega_z):
     if len(I) < 2:
         return 0.0
     dI = np.diff(I)  # centred on tK[1:-1]
-    return float(-0.5 * np.sum(g_of_t(tK[1:-1], g2D, omega_z) * dI))
+    return float(-0.5 * np.sum(g_of_t(tK[1:-1], g2D, omega_z, diag.get("s0", 1.0)) * dI))
 
 
 # ----------------------------------------------------------------------------
@@ -1387,13 +1421,22 @@ def tof_pipeline(
     dof=True,
     focus=0.0,
     dt_check="raise",
+    s0=1.0,
 ):
     """meanfield_stage (t <= t1) -> demodulate -> propagate_orders -> image.
     tail='mf' (default: per-order mean-field tail) or 'linear' (not converged at t1 = 1 ms: 5.0 %
     t1-truncation error at R0 = 25 a against 0.15 % with the MF tail, n_bar = 2).
     Defaults: dt='auto' (kinetic phase <= 2 rad/step), coherent imaging along z with the
     depth-of-field factor of the expanded pancake (dof=True) and no pulse push (s_sat = 0).
-    Returns dict(image, orders, orders_t1, mf)."""
+    s0: the vertical release width of `g_of_t` for the stage and the tail: 1 (default, the oscillator
+    width: right for a fixed-g2D state), a number, or "npse" (`npse_release_width` of the input density:
+    use it for an NPSE state). Returns dict(image, orders, orders_t1, mf, s0)."""
+    if isinstance(s0, str):
+        if s0 != "npse":
+            raise ValueError(f"s0 must be a number or 'npse', got {s0!r}")
+        p_in, _ = _as_stack(psi)
+        s0 = npse_release_width(_bk(p_in).to_numpy(_bk(p_in).abs2(p_in).sum(0)), g2D, omega_z)
+    s0 = float(s0)
     if t1 > 0 and g2D > 0:
         mf = meanfield_stage(
             psi,
@@ -1408,16 +1451,17 @@ def tof_pipeline(
             eps=eps,
             box=mf_box,
             dt_check=dt_check,
+            s0=s0,
         )
         psi_t1, dxx, org, t_dem = mf.psi, (mf.dx, mf.dy), mf.origin, t1
     else:  # no stage, or non-interacting: the stage would be a free propagation
         mf, psi_t1, dxx, org, t_dem = None, psi, dx, origin, 0.0
     orders = demodulate(psi_t1, dxx, G_list, q_cut=q_cut, dx_coarse=dx_coarse, origin=org, filt=filt, t=t_dem)
     if tail == "mf" and g2D > 0:
-        prop = propagate_orders(orders, t_tof, eps=eps, g2D=g2D, omega_z=omega_z)
+        prop = propagate_orders(orders, t_tof, eps=eps, g2D=g2D, omega_z=omega_z, s0=s0)
     else:
         prop = propagate_orders(orders, t_tof, eps=eps)
     im = image(
         prop, pixel=pixel, component=image_component, fov=fov, offset=offset, s_sat=s_sat, NA=NA, dof=dof, focus=focus
     )
-    return dict(image=im, orders=prop, orders_t1=orders, mf=mf)
+    return dict(image=im, orders=prop, orders_t1=orders, mf=mf, s0=s0)

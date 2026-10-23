@@ -315,3 +315,40 @@ def test_m4_supercell_spectrum():
         f"(spin weight > 0.5) at Gamma among 16: {spin_txt}"
     )
     assert ss["c"] > 0
+
+
+def test_one_empty_component_has_one_goldstone_mode():
+    """Omega_R = 0 with component 1 empty (psi0 = (0, sqrt n), the ground state at Delta > 0): the
+    relative-phase vector (psi1, -psi2) = -psi0 is not a second Goldstone mode, so only one direction is
+    projected out. Exact spectrum: the Bogoliubov branch of component 2, sqrt(eps (eps + 2 g n)) for
+    k != 0, and the free component-1 particles in its field, eps + Delta for every k (k = 0 included).
+    Both solvers (the dense one used to drop a valid mode, lobpcg raised on the singular Gram matrix)."""
+    gn, dl = 0.4, 0.3
+    g = Grid((48,), (8.0,), device=CPU)
+    eng = BilayerGPE(g, None, g=gn, Omega_R=0.0, delta=dl, n_components=2)
+    psi0 = torch.zeros((1, 2, 48), dtype=C128)
+    psi0[:, 1] = 1.0
+    assert float(eng.residual(psi0)[0]) < 1e-12
+    bd = BdG(eng, psi0)
+    assert bd.zero_modes()[0].shape[0] == 1
+    kj = 2 * np.pi * np.fft.fftfreq(48, d=8.0 / 48)
+    eps = KAPPA * kj**2
+    exact = np.sort(np.concatenate([_bogoliubov(eps[eps > 1e-14], gn), eps + dl]))[:8]
+    assert np.allclose(bd.solve(8, method="dense").omega.numpy(), exact, rtol=1e-10)
+    assert np.allclose(bd.solve(8, tol=1e-9).omega.numpy(), exact, rtol=1e-6)
+
+
+def test_mu_does_not_inherit_single_precision():
+    """With a complex64 engine the BdG mu is <psi0|H_GP|psi0> from the operator's own float64 blocks, not
+    the engine's single-precision energy_terms: it equals the complex128 mu of the same (float32-rounded)
+    potential to 1e-12, while the complex64 energy_terms is off by more than 1e-9."""
+    g = Grid((96,), (6.0,), device=CPU)
+    e128 = BilayerGPE(g, lattice_1d(g, 8.0), g=0.2, n_components=1)
+    r = relax(e128, initial_state(e128, 6.0), 6.0, tol=1e-11, polish_steps=20000)
+    e64 = e128.to_dtype(torch.complex64)
+    e64_in_128 = e64.to_dtype(torch.complex128)  # the rounded V and parameters, evaluated in double
+    mu_ref = float(e64_in_128.energy_terms(r.psi)["mu"][0])
+    mu64_engine = float(e64.energy_terms(r.psi.to(torch.complex64))["mu"][0])
+    assert abs(mu64_engine - mu_ref) > 1e-9  # the engine's single precision is visible
+    assert BdG(e64, r.psi).mu == pytest.approx(mu_ref, rel=1e-12)
+    assert BdG(e64_in_128, r.psi).mu == pytest.approx(mu_ref, rel=1e-14)

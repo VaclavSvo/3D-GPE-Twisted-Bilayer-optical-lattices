@@ -308,8 +308,21 @@ are cheap (the experiment's cloud takes 0.1 GiB and half a minute) and stay in c
 superfluid fractions and real-time runs.
 
 `gpu_3d_nz` checks the vertical resolution: the same cloud at several N_z over the same z box, each against
-the finest. In complex128 on the experiment's cloud, N_z = 24 over ±5 l_z (dz = 0.42 l_z) agrees with
-N_z = 64 to 4 × 10⁻¹⁰ and N_z = 16 to 6 × 10⁻⁶; a ±6 or ±7 l_z box changes nothing at 10⁻⁹.
+the finest. In complex128 (`--128`) on the experiment's cloud, N_z = 24 over ±5 l_z (dz = 0.42 l_z) agrees
+with N_z = 64 to 4 × 10⁻¹⁰ and N_z = 16 to 6 × 10⁻⁶ (relative, in the peak density); a ±6 or ±7 l_z box
+changes nothing at 10⁻⁹. The shipped row runs in complex64, whose residual floor (~10⁻⁵ E_R) is far above
+these differences: its N_z table shows noise at the 10⁻⁷ level in μ, not the N_z dependence.
+
+**Containment.** The trapped box is periodic, so a cloud wider than the box overlaps its own images and
+every observable then describes overlapping clouds. Before allocating the grid, every trapped run solves
+the LDA in the infinite plane and compares its Thomas–Fermi radius with the box: a cloud whose radius
+exceeds 0.88 of the half-width (above that the experiment's cloud has more than ~10⁻³ of its peak density at
+the edge) is refused with the box size that holds it (`containment="enlarge"` in a 2D row takes that box at
+the same N and ν_r, `"warn"` runs anyway; 3D rows pin their box). A larger 3D box at fixed peak density
+(`gpu_3d_vs_2d`) scales the cloud with the box, so it never contains a cloud that 3 × 3 does not. After the solve each summary records `checks`:
+`contained` (edge density below 10⁻³ of the peak), `converged`, and WARNING lines in the report when either
+fails. Deep lattices and strong coupling widen the experiment's cloud a lot (R_TF ≈ 62 a at V₀ = 12 E_R,
+Ω_R = 1 E_R, against a 3 × 3 half-width of 33 a).
 
 `gpu_xy_convergence` does the same in the plane: the homogeneous supercell at V₀ = 4, 8, 16 E_R from 4 to 24
 points per a, and the trapped cloud from 4 to 16 points per a (88 to 352 per supercell), each against the
@@ -326,7 +339,7 @@ cloud; each source changes every observable by ≤ 10⁻⁵ relative):
 | in-plane points | 176 per supercell (8 per a) at 4 E_R; 12 per a at 8–12 E_R, 16 per a beyond | |
 | vertical | N_z = 24 over ±5 l_z (16 if memory forces it) | |
 | tolerance | residual 10⁻⁹ E_R (tighter changes nothing above 10⁻⁸) | |
-| box | the cloud's edge density below 10⁻³ of its peak: 5 × 5 supercells for N = 2000 at 20 Hz. A 3 × 3 box moves absolute values (R_rms by 5 × 10⁻⁴ a) but not the 3D − quasi-2D differences | 5 × 5 at N_z 24: 6.8 GiB, 6 min; 7 × 7 at N_z 16: 8.9 GiB, 10 min |
+| box | the cloud's edge density below 10⁻³ of its peak: 5 × 5 supercells for N = 2000 at 20 Hz and 4 E_R. A 3 × 3 box moves absolute values (R_rms by 5 × 10⁻⁴ a) but not the 3D − quasi-2D differences, for this cloud; deeper lattices or stronger coupling need larger boxes (see Containment) | 5 × 5 at N_z 24: 6.8 GiB, 6 min; 7 × 7 at N_z 16: 8.9 GiB, 10 min |
 
 The complex128 3D solve costs about 12 ns per grid point per step and 394 bytes per point; from the NPSE
 start it needs about 1600 steps for a 20 Hz trap, and more in weaker traps (5600 at 8.6 Hz). Leave about

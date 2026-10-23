@@ -609,6 +609,7 @@ def run_trapped(name: str, row: dict) -> None:
     )
     _section("run")
     run = TR.trapped_ground_state(spec, verbose=VERBOSE)
+    spec = run["spec"]  # the box may have been enlarged (spec.containment = "enlarge")
     res = TR.summary(run, spec, s_sat=row.get("s_sat", 0.01))
     out = _outdir(name)
     os.makedirs(os.path.join(out, "fields"), exist_ok=True)
@@ -635,7 +636,11 @@ def run_trapped(name: str, row: dict) -> None:
         f"C_coh(in focus) {ins['C_coh_infocus']:.5f}, C_psf {ins['C_psf']:.5f}, n_AA {ins['n_AA']:.4f}, n_AB {ins['n_AB']:.4f}",
         f"  LDA start: C_raw {res['lda']['insitu']['C_raw']:.5f}, nbar_centre {res['lda']['cloud']['nbar_centre_cell']:.4f}, "
         f"R_rms {res['lda']['cloud']['R_rms']:.4f} a, E/N {res['lda']['E_per_N']:.8f}",
+        f"  containment: R_TF = {res['containment']['R_TF']:.2f} a, box half-width {res['containment']['half_width']:.2f} a "
+        f"({res['containment']['action']}); checks: contained {res['checks']['contained']}, "
+        f"converged {res['checks']['converged']}",
     ]
+    lines = [f"WARNING: {w}" for w in res["checks"]["warnings"]] + lines
     with open(os.path.join(out, "summary.txt"), "w") as f:
         f.write("\n".join(lines) + "\n")
     _section("result")
@@ -828,14 +833,22 @@ def run_trapped_3d(name: str, row: dict) -> None:
     print(T3.describe_plan(spec, vert) + f", 3D in {dtype}, 2D in {dtype_2d}")
     _section("run")
     res = T3.solve_models(spec, vert, dtype, verbose=VERBOSE, dtype_2d=dtype_2d)
+    spec = res["spec"]
     obs = T3.model_observables(res, s_sat=row.get("s_sat", 0.01))
     cmp = T3.compare_models(res, obs)
+    chk = T3.run_checks(obs)
     out = _outdir(name)
     report = T3.report_models(obs, cmp)
     head = T3.describe_plan(spec, vert) + f", 3D in {dtype}, 2D in {dtype_2d}"
     if HAS_GPU and obs["3d"]["peak_gib"] is not None:
         total = torch.cuda.get_device_properties(0).total_memory / 2**30
         head += f"\n3D solve peak memory {obs['3d']['peak_gib']:.2f} GiB of {total:.1f} GiB"
+    cont = res["containment"]
+    head += (
+        f"\ncontainment: R_TF = {cont['R_TF']:.2f} a, box half-width {cont['half_width']:.2f} a ({cont['action']}); "
+        + T3.describe_checks(chk)
+    )
+    head += "".join(f"\nWARNING: {w}" for w in chk["warnings"])
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump(
             dict(
@@ -845,6 +858,8 @@ def run_trapped_3d(name: str, row: dict) -> None:
                 dtype=dtype,
                 dtype_2d=dtype_2d,
                 plan=plan_info,
+                containment=cont,
+                checks=chk,
                 observables=obs,
                 comparison=cmp,
                 g3d=res["g3d"],
@@ -921,10 +936,12 @@ def run_trapped_3d_precision(name: str, row: dict) -> None:
         runs[d] = (res, obs, T3.compare_models(res, obs))
     elapsed = time.time() - t0
     (r128, o128, c128), (r64, o64, c64) = runs["complex128"], runs["complex64"]
+    spec = r128["spec"]
+    chk = {d: T3.run_checks(runs[d][1]) for d in dtypes}
     table, numbers = T3.precision_table(o64, o128, c128)
     dA = r128["grid2"].dx[0] * r128["grid2"].dx[1]
     dens = {m: T3.density_deviation(r64["models"][m]["n"], r128["models"][m]["n"], dA) for m in T3.MODELS}
-    lines = [
+    lines = [f"WARNING: {d} {w}" for d in dtypes for w in chk[d]["warnings"]] + [
         T3.describe_plan(spec, vert),
         f"wall time {elapsed / 60:.1f} min (target {minutes:g} min)",
         "",
@@ -948,6 +965,8 @@ def run_trapped_3d_precision(name: str, row: dict) -> None:
                 z_extent_lz=vert.z_extent_lz,
                 plan=plan_info,
                 elapsed_seconds=elapsed,
+                containment=r128["containment"],
+                checks=chk,
                 observables={d: runs[d][1] for d in dtypes},
                 comparison={d: runs[d][2] for d in dtypes},
                 precision=numbers,
@@ -1006,6 +1025,8 @@ def run_trapped_3d_nz(name: str, row: dict) -> None:
         verbose=VERBOSE,
     )
     report = T3.report_nz(conv)
+    spec = conv["spec"]
+    chk = T3.run_checks(dict(npse=conv["npse"], **{f"Nz={r['Nz']}": r["observables"] for r in conv["rows"]}))
     out = _outdir(name)
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump(
@@ -1014,6 +1035,8 @@ def run_trapped_3d_nz(name: str, row: dict) -> None:
                 z_extent_lz=conv["z_extent_lz"],
                 dtype=dtype,
                 dtype_2d=dtype_2d,
+                containment=conv.get("containment"),
+                checks=chk,
                 npse=conv["npse"],
                 rows=[{k: v for k, v in r.items() if k != "numbers"} for r in conv["rows"]],
             ),
@@ -1022,6 +1045,7 @@ def run_trapped_3d_nz(name: str, row: dict) -> None:
             default=float,
         )
     head = T3.describe_plan(spec, vert) + f" (finest); 3D in {dtype}, 2D in {dtype_2d}"
+    head += "".join(f"\nWARNING: {w}" for w in chk["warnings"])
     with open(os.path.join(out, "report.txt"), "w") as f:
         f.write(head + "\n" + report + "\n")
     _section("result")

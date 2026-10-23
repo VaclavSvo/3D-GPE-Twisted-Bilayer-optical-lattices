@@ -173,3 +173,64 @@ def test_aligned_bounds_need_the_supercell():
         leggett_bounds_aligned(np.ones((64, 64)), 0.25)
     with pytest.raises(ValueError):
         leggett_bounds_aligned(np.ones((88, 88)), L / 88, "z")
+
+
+# ------------------------------------------------------------------- ringing of the raw envelope
+def _pockets(N, width):
+    """Narrow Gaussian pockets on the AA points of the supercell and nothing else: the pocket regime,
+    where the hard |k| < pi/a cutoff rings below zero at the empty AB points. [iy, ix] order."""
+    box = im.Box(N, N, L / N)
+    x = box.x0 + box.dx * np.arange(N)
+    X, Y = np.meshgrid(x, x, indexing="xy")
+    n = np.zeros_like(X)
+    for px, py in im.moire_points(L, box)["AA"]:
+        dx_ = X - px - L * np.round((X - px) / L)
+        dy_ = Y - py - L * np.round((Y - py) / L)
+        n += np.exp(-(dx_**2 + dy_**2) / (2 * width**2))
+    return n, box
+
+
+def test_smooth_envelope_has_no_ringing():
+    """The smooth envelope's transfer is W(0) = 1, W(pi/a) = 0, and its kernel is non-negative, so on
+    sharp AA pockets (where the raw envelope rings below zero at AB and C_raw > 1) the smooth envelope
+    stays >= 0 everywhere and C_smooth <= 1; raw_ringing flags the raw case."""
+    assert im.smooth_transfer(0.0) == pytest.approx(1.0) and im.smooth_transfer(np.pi) == pytest.approx(0.0, abs=1e-15)
+    k = np.linspace(0, np.pi, 50)
+    assert np.all(np.diff(im.smooth_transfer(k)) <= 0)
+    n, box = _pockets(176, 0.35)
+    c = im.moire_contrasts(n, box)
+    assert c["S_raw_AB"] < 0 and c["C_raw_AAAB"] > 1.0 and c["raw_ringing"]  # the failure mode
+    assert c["S_smooth_AB"] >= 0.0 and 0.0 < c["C_smooth_AAAB"] <= 1.0
+    KX, KY = np.meshgrid(box.kx0, box.ky0, indexing="xy")
+    env = np.fft.ifft2(np.fft.fft2(n) * im.smooth_transfer(np.sqrt(KX**2 + KY**2))).real
+    assert env.min() > -1e-12 * env.max()
+    # a smooth moire cosine has no ringing: the flag is off and C_raw is the analytic value
+    x = box.x0 + box.dx * np.arange(176)
+    X, Y = np.meshgrid(x, x, indexing="xy")
+    G = 4 * np.pi / L
+    c2 = im.moire_contrasts(1 + 0.1 * (np.cos(G * X) + np.cos(G * Y)), box)
+    assert not c2["raw_ringing"] and c2["C_smooth_AAAB"] == pytest.approx(0.2 * float(im.smooth_transfer(G)), rel=1e-9)
+    so = im.standard_observables(n.T, n.T, box.dx)
+    assert so["raw_ringing"] and so["C_smooth"] == pytest.approx(c["C_smooth_AAAB"])
+
+
+def test_evaluate_nyquist_mode_is_symmetric():
+    """A pure cos(pi x/dx) cos(pi y/dy) mode on an even grid: +-1 on the grid points, 0 half-way between
+    them (the symmetric interpolant, as in tof's pixel binning; the one-sided exponential gave -1)."""
+    N = 16
+    box = im.Box(N, N, 0.5)
+    x = box.x0 + box.dx * np.arange(N)
+    X, Y = np.meshgrid(x, x, indexing="xy")
+    f = np.cos(np.pi * (X - box.x0) / box.dx) * np.cos(np.pi * (Y - box.y0) / box.dx)
+    Fk = np.fft.fft2(f)
+    on = im.evaluate(Fk, box, x[:4], x[:4])
+    assert np.allclose(on, f[:4, :4], atol=1e-12)
+    half = im.evaluate(Fk, box, x[:4] + 0.5 * box.dx, x[:4] + 0.5 * box.dx)
+    assert np.abs(half).max() < 1e-12
+    # a single-axis Nyquist mode times a smooth one is unchanged by the symmetric form
+    g = np.cos(np.pi * (X - box.x0) / box.dx) * np.cos(2 * np.pi * (Y - box.y0) / (N * box.dx))
+    s = 0.3 * box.dx
+    val = im.evaluate(np.fft.fft2(g), box, [x[2] + s], [x[5]])[0, 0]
+    assert val == pytest.approx(
+        np.cos(np.pi * (2 * box.dx + s) / box.dx) * np.cos(2 * np.pi * 5 * box.dx / (N * box.dx)), abs=1e-12
+    )

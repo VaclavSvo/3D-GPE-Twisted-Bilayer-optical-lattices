@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -126,6 +127,22 @@ def _reset_peak() -> None:
 
 
 # ----------------------------------------------------------------------------- the three solves
+def _no_enlarge(spec: TR.TrappedSpec) -> TR.TrappedSpec:
+    """containment="enlarge" becomes "refuse" for a 3D run: its box and N_z are sized (and memory-checked)
+    before the supercell scan exists, so an enlarged box would bypass that sizing; pin box_cells to the box
+    the refusal names instead. Note also that `scaled` keeps R_TF / half-width fixed: a larger box at fixed
+    peak density never contains a cloud that box 3 does not; the same N and nu_r in a larger box need the
+    row's N_atoms and nu_r_hz divided by (box / 3)^2 and multiplied by box / 3."""
+    if spec.containment == "enlarge":
+        warnings.warn(
+            'containment="enlarge" is not available for 3D runs (the box is sized before the scan); using "refuse"',
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return replace(spec, containment="refuse")
+    return spec
+
+
 def solve_models(
     spec: TR.TrappedSpec,
     vert: Vertical,
@@ -139,7 +156,7 @@ def solve_models(
     column density, mu, E_per_N, residual, steps, seconds, peak_gib, ...)}, width_3d, width_npse (both
     <z^2> / (l_z^2 / 2)), grid2, grid3)."""
     dtype_2d = dtype if dtype_2d is None else dtype_2d
-    spec = replace(spec, dtype=str(dtype_2d), vertical="npse")
+    spec = replace(_no_enlarge(spec), dtype=str(dtype_2d), vertical="npse")
     g3d, wz, lz = couplings_3d(spec)
     if scan is None:
         scan = TR.supercell_scan(spec, verbose=verbose)
@@ -149,6 +166,8 @@ def solve_models(
     _reset_peak()
     run = TR.trapped_ground_state(spec, scan=scan, verbose=verbose)
     synchronize()
+    spec = run["spec"]  # resolve_box may have enlarged the box: the fixed-g and 3D solves use the same one
+    out["containment"] = run["containment"]
     eng_n, psi_n, r = run["engine"], run["psi"], run["result"]
     out["models"]["npse"] = _numbers_2d(eng_n, psi_n, r, run["polish_seconds"], wz=0.0)
     grid2 = run["grid"]
@@ -206,8 +225,10 @@ def solve_3d(
         residual=float(r3.residual[0]),
         converged=bool(r3.converged[0]),
         steps=int(r3.steps),
+        stop_reason=r3.stop_reason,
         seconds=sec3,
         peak_gib=_peak_gib(),
+        dtype=str(e3.dtype),
     )
     del e3, r3
     _reset_peak()
@@ -229,10 +250,12 @@ def nz_convergence(
     observables, width_max, width_mean)], npse = observables of the NPSE cloud, finest = index of the
     finest N_z, spec)."""
     Nz_list = sorted(int(n) for n in Nz_list)
-    spec2 = replace(spec, dtype=str(dtype_2d), vertical="npse")
+    spec2 = replace(_no_enlarge(spec), dtype=str(dtype_2d), vertical="npse")
     _, wz, lz = couplings_3d(spec2)
     scan = TR.supercell_scan(spec2, verbose=verbose)
     run = TR.trapped_ground_state(spec2, scan=scan, verbose=verbose)
+    spec2 = run["spec"]
+    containment = run["containment"]
     eng_n, psi_n = run["engine"], run["psi"]
     npse = eng_n.interaction
     grid2 = run["grid"]
@@ -263,7 +286,15 @@ def nz_convergence(
     )
     for r in rows:
         r["observables"] = obs[r["Nz"]]
-    return dict(rows=rows, npse=obs["npse"], finest=len(rows) - 1, spec=spec2, grid2=grid2, z_extent_lz=z_extent_lz)
+    return dict(
+        rows=rows,
+        npse=obs["npse"],
+        finest=len(rows) - 1,
+        spec=spec2,
+        grid2=grid2,
+        z_extent_lz=z_extent_lz,
+        containment=containment,
+    )
 
 
 NZ_KEYS = ("mu", "E_per_N", "C_raw", "C_coh", "n_AA", "n_AB", "R_rms", "n_peak")
@@ -316,8 +347,10 @@ def _numbers_2d(eng, psi, r, seconds, wz) -> dict:
         residual=float(r.residual[0]),
         converged=bool(r.converged[0]),
         steps=int(r.steps),
+        stop_reason=r.stop_reason,
         seconds=float(seconds),
         peak_gib=_peak_gib(),
+        dtype=str(eng.dtype),
     )
 
 
@@ -358,8 +391,35 @@ def model_observables(res: dict, s_sat: float = 0.01) -> dict:
             steps=m["steps"],
             seconds=m["seconds"],
             peak_gib=m["peak_gib"],
+            C_smooth=ins["C_smooth"],
+            raw_ringing=ins["raw_ringing"],
+        )
+        obs[name]["checks"] = TR.checks(
+            cloud["edge_density_rel"], m["converged"], m["residual"], m.get("dtype"), m.get("stop_reason")
         )
     return obs
+
+
+def run_checks(obs: dict) -> dict:
+    """The checks of every model in one place: per model contained / converged, ok = all of them, and the
+    warnings (prefixed with the model) for the report."""
+    per = {name: o["checks"] for name, o in obs.items() if isinstance(o, dict) and "checks" in o}
+    warns = [f"{name}: {w}" for name, c in per.items() for w in c["warnings"]]
+    return dict(
+        models=per,
+        contained=all(c["contained"] for c in per.values()),
+        converged=all(c["converged"] for c in per.values()),
+        at_precision_floor=[name for name, c in per.items() if c.get("at_precision_floor")],
+        ok=all(c["ok"] for c in per.values()),
+        warnings=warns,
+    )
+
+
+def describe_checks(chk: dict) -> str:
+    """One line for a report: ok, contained, converged, and which models stopped at the complex64 floor."""
+    floor = chk.get("at_precision_floor") or []
+    note = f"; at the complex64 residual floor: {', '.join(str(f) for f in floor)}" if floor else ""
+    return f"checks: ok {chk['ok']} (contained {chk['contained']}, converged {chk['converged']}{note})"
 
 
 COMPARED = ("mu", "E_per_N", "C_raw", "C_coh", "n_AA", "n_AB", "R_rms", "N2_over_N", "n_peak")

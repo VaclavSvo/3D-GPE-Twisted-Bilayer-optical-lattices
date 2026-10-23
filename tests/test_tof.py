@@ -674,3 +674,41 @@ def test_satellite_contrast_weak_nearfield_satellite():
     pr = tof.satellite_contrast_profile(im, d)
     assert sc["resolved"] and 0.05 < sc["C_sat"] < 0.6, sc["C_sat"]
     assert pr["resolved"] and pr["C_prof"] > 0.02, pr["C_prof"]  # measured 0.045 (C_sat 0.091)
+
+
+# ----------------------------------------------------------------------------
+# the release width of the mean-field coupling
+# ----------------------------------------------------------------------------
+def test_release_width_coupling():
+    """g(t) of a pancake released from width s0 l_z: s0 = 1 is the oscillator formula
+    g2D / sqrt(1 + w^2 t^2) exactly; the integral is the closed form of the quadrature; g(0) = g2D / s0
+    and g -> g2D s0 / (w t) late (the wider start expands more slowly); the NPSE width of a density is
+    1 for n -> 0 and solves the quartic of engine.npse; meanfield_stage records s0 and with s0 = 1 is
+    unchanged."""
+    from scipy.integrate import quad
+
+    from twisted_bilayer.engine.npse import NPSE2D
+
+    g2, wz = 0.7, 1.3
+    t = np.linspace(0.0, 30.0, 7)
+    assert np.allclose(tof.g_of_t(t, g2, wz), g2 / np.sqrt(1 + (wz * t) ** 2), rtol=0, atol=1e-15)
+    assert np.allclose(tof.g_integral(t, g2, wz), g2 * np.arcsinh(wz * t) / wz, rtol=0, atol=1e-15)
+    for s0 in (1.0, 1.15):
+        num = quad(lambda u, s=s0: tof.g_of_t(u, g2, wz, s), 0.0, 12.0, epsabs=1e-13)[0]
+        assert tof.g_integral(12.0, g2, wz, s0) == pytest.approx(num, rel=1e-10)
+        assert tof.g_of_t(0.0, g2, wz, s0) == pytest.approx(g2 / s0)
+        assert tof.g_of_t(1e6, g2, wz, s0) == pytest.approx(g2 * s0 / (wz * 1e6), rel=1e-9)
+    assert tof.g_integral(2.0, g2, 0.0, 1.15) == pytest.approx(g2 * 2.0 / 1.15)
+    assert tof.npse_release_width(np.full(5, 1e-9), g2, wz) == pytest.approx(1.0, abs=1e-8)
+    n = np.array([3.0, 11.6])
+    import torch
+
+    s_engine = NPSE2D(g2, wz).width(torch.as_tensor(n)).numpy()
+    w = n * n
+    assert tof.npse_release_width(n, g2, wz) == pytest.approx(float((s_engine * w).sum() / w.sum()), rel=1e-12)
+    psi, dx, org, _ = _synthetic_a(L=64.0, R0=6.0)
+    a = tof.meanfield_stage(psi, dx, 0.5, 5 * tof.G2D, tof.OMEGA_Z, origin=org)
+    b = tof.meanfield_stage(psi, dx, 0.5, 5 * tof.G2D, tof.OMEGA_Z, origin=org, s0=1.0)
+    c = tof.meanfield_stage(psi, dx, 0.5, 5 * tof.G2D, tof.OMEGA_Z, origin=org, s0=1.2)
+    assert a.diag["s0"] == 1.0 and np.array_equal(np.asarray(a.psi), np.asarray(b.psi))
+    assert c.diag["s0"] == 1.2 and np.abs(np.asarray(c.psi) - np.asarray(a.psi)).max() > 1e-6

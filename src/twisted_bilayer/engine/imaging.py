@@ -6,11 +6,19 @@ grid order [ix, iy], paper labels: component 2 is the imaged |2>) and returns ev
 a dict of floats. Inside this module arrays are indexed [iy, ix] (rows = y) on the periodic box
 x_j = x0 + j dx with the AA point at the origin; lengths in a, densities in atoms per a^2.
 
-Contrast C = (S_AA - S_AB) / (S_AA + S_AB) of |2>, signed (+ = AA-bright), for three imaging models:
-  raw   the moire envelope, n2 low-passed at |k| < pi/a (removes the atomic lattice) -- an ideal imager;
-  coh   coherent absorption imaging: the amplitude pupil NA = 0.69 with the probe push at saturation
-        s (tof.coherent_transfer_k). Compare this one, or C_raw, with data;
-  psf   the legacy incoherent Gaussian PSF (sigma = 0.625 a) on 0.32 um pixels; kept for comparison.
+Contrast C = (S_AA - S_AB) / (S_AA + S_AB) of |2>, signed (+ = AA-bright), for these imaging models:
+  raw     the moire envelope, n2 low-passed at |k| < pi/a (removes the atomic lattice) -- an ideal imager.
+          The hard cutoff rings: its real-space kernel (an Airy amplitude) has negative lobes, so next to
+          sharp AA pockets the envelope can go below zero at nearly empty AB points and C_raw > 1.
+          `raw_ringing` flags S_raw_AB < 0 (or S_raw_AA < 0);
+  smooth  the same band limit |k| < pi/a with the incoherent optical transfer function of a circular pupil,
+          W(k) = (2/pi) [arccos(k/k_c) - (k/k_c) sqrt(1 - (k/k_c)^2)], k_c = pi/a (the autocorrelation of a
+          disc of radius k_c/2): its kernel is the Airy intensity |2 J1(u)/u|^2 >= 0, so the envelope of a
+          non-negative density stays non-negative and |C_smooth| <= 1. It weights the moire harmonics below
+          pi/a by W(k) < 1, so C_smooth is not C_raw: it is the raw envelope without the ringing;
+  coh     coherent absorption imaging: the amplitude pupil NA = 0.69 with the probe push at saturation
+          s (tof.coherent_transfer_k). Compare this one, or C_raw where raw_ringing is False, with data;
+  psf     the legacy incoherent Gaussian PSF (sigma = 0.625 a) on 0.32 um pixels; kept for comparison.
 S_AA, S_AB are averages over the AA / AB points of a supercell box, or the central AA point and its
 four AB corners on a larger (trapped-cloud) box. Every evaluation is exact in Fourier space.
 
@@ -60,13 +68,24 @@ def _k_mesh(box: Box):
     return np.meshgrid(box.kx0, box.ky0, indexing="xy")
 
 
+def _interp_matrix(c: np.ndarray, origin: float, k: np.ndarray) -> np.ndarray:
+    """exp(i k (c - origin)) for every point and wavenumber; on an even grid the Nyquist column is
+    cos(k_N (c - origin)), the symmetric (real) interpolant of the unpaired Nyquist coefficient."""
+    E = np.exp(1j * np.outer(c - origin, k))
+    if k.size % 2 == 0:
+        E[:, k.size // 2] = np.cos((c - origin) * k[k.size // 2])
+    return E
+
+
 def evaluate(field_k: np.ndarray, box: Box, xs, ys) -> np.ndarray:
     """Band-limited interpolation of a real periodic field at the points xs x ys, from its FFT
-    `field_k`. Returns (len(ys), len(xs))."""
+    `field_k`. Returns (len(ys), len(xs)). The Nyquist modes of an even grid enter with a cosine factor
+    per axis (the symmetric interpolant), as in tof's pixel binning: a pure cos(pi x/dx) cos(pi y/dy)
+    mode then reads 0 half-way between grid points, not -1."""
     xs = np.atleast_1d(np.asarray(xs, dtype=float))
     ys = np.atleast_1d(np.asarray(ys, dtype=float))
-    Ex = np.exp(1j * np.outer(xs - box.x0, box.kx0))
-    Ey = np.exp(1j * np.outer(ys - box.y0, box.ky0))
+    Ex = _interp_matrix(xs, box.x0, box.kx0)
+    Ey = _interp_matrix(ys, box.y0, box.ky0)
     return (Ey @ field_k @ Ex.T).real / (box.Nx * box.Ny)
 
 
@@ -136,7 +155,9 @@ def moire_contrasts(
     along x through AA (_line_x), along the diagonal (_diag), within the central moire cell
     (_central), over the box (_global, supercell only); C_img_central / C_img_global on the
     pixelated PSF image (the paper's (max - min)/(max + min)). For a trapped cloud only the AA/AB
-    and the central values are meaningful (the global ones see the trap envelope)."""
+    and the central values are meaningful (the global ones see the trap envelope). Also the smooth
+    envelope's C_smooth_AAAB with S_smooth_AA/AB (`smooth_transfer`, the same k_cut), and raw_ringing
+    (S_raw_AB < 0 or S_raw_AA < 0: C_raw is then outside [-1, 1] or unreliable near it)."""
     KX, KY = _k_mesh(box)
     F = np.fft.fft2(n2)
     out: dict = {}
@@ -153,11 +174,23 @@ def moire_contrasts(
         )
         cell = evaluate(Fk, box, np.linspace(-L / 4, L / 4, 89), np.linspace(-L / 4, L / 4, 89))
         out[f"C_{tag}_central"] = _contrast(cell)
+    sAA, sAB = _aa_ab_means(F * smooth_transfer(np.sqrt(KX**2 + KY**2), k_cut), box, L)
+    out["S_smooth_AA"], out["S_smooth_AB"] = float(sAA), float(sAB)
+    out["C_smooth_AAAB"] = float((sAA - sAB) / (sAA + sAB))
+    out["raw_ringing"] = bool(out["S_raw_AB"] < 0.0 or out["S_raw_AA"] < 0.0)
     h = L / 4 + pixel / 2  # the central cell plus half a pixel: the AB corners are inside
     out["C_img_central"] = _contrast(image(n2, box, sigma, pixel, extent=(-h, h, -h, h))[2])
     if box.is_supercell(L):
         out["C_img_global"] = _contrast(image(n2, box, sigma, pixel)[2])
     return out
+
+
+def smooth_transfer(k, k_cut: float = np.pi) -> np.ndarray:
+    """W(k) = (2/pi) [arccos(q) - q sqrt(1 - q^2)], q = k / k_cut < 1, else 0: the incoherent transfer
+    function of a circular pupil of cutoff k_cut. W(0) = 1, band-limited at k_cut like the raw envelope,
+    and its 2D kernel is non-negative (the Airy intensity), so it preserves n >= 0."""
+    q = np.clip(np.asarray(k, float) / float(k_cut), 0.0, 1.0)
+    return (2.0 / np.pi) * (np.arccos(q) - q * np.sqrt(1.0 - q * q))
 
 
 def transfer_contrasts(n2: np.ndarray, box: Box, transfer, L: float = L_SUPERCELL, pixel: float = PIXEL) -> dict:
@@ -240,8 +273,8 @@ def standard_observables(
     n/m: the box is the supercell of side L = sqrt(m^2 + n^2) a, or a multiple of it (a trapped cloud;
     then the central cell is used).
 
-    On |2>: C_raw, C_psf with S_{raw,psf}_{AA,AB}, C_img_central, C_paper_signed and the diagnostics
-    of `moire_contrasts`; C_coh, S_coh_AA/AB, C_coh_img through the imaging transfer ('coherent' at
+    On |2>: C_raw, C_psf, C_smooth with S_{raw,psf,smooth}_{AA,AB}, raw_ringing (1.0 or 0.0), C_img_central,
+    C_paper_signed and the diagnostics of `moire_contrasts`; C_coh, S_coh_AA/AB, C_coh_img through the imaging transfer ('coherent' at
     s_sat, default config S_SAT = 0.01; 'pupil' = the in-focus pupil, s = 0); F_moire_10/11/20.
     On the total density: C_raw_total; n_AA, n_AB, C_cell_n; the Leggett bounds of f_s in the box
     frame (fs_lower/upper_x/y: loose while the primary lattice dominates, the box axes are rotated by
@@ -254,8 +287,11 @@ def standard_observables(
     n2y, ny = n2x.T, (n1x + n2x).T  # [iy, ix]
     out: dict = {"dx": float(dx), "Lx": box.Lx, "Ly": box.Ly}
     c = moire_contrasts(n2y, box, L)
-    out["C_raw"], out["C_psf"] = c["C_raw_AAAB"], c["C_psf_AAAB"]
+    out["C_raw"], out["C_psf"], out["C_smooth"] = c["C_raw_AAAB"], c["C_psf_AAAB"], c["C_smooth_AAAB"]
+    out["raw_ringing"] = float(c["raw_ringing"])  # 1.0 / 0.0: the bundle returns floats only
     for k in (
+        "S_smooth_AA",
+        "S_smooth_AB",
         "S_raw_AA",
         "S_raw_AB",
         "S_psf_AA",

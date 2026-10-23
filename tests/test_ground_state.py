@@ -133,3 +133,34 @@ def test_residual_of_exact_eigenstate():
     x = g.coord(0)
     bent = psi * (torch.exp(1j * k * x) + 0.3 * torch.exp(2j * k * x)).to(torch.complex128)
     assert float(eng1.residual(bent).min()) > 1e-2
+
+
+def test_stop_reason_and_stall_window():
+    """relax records why it ended: "tol" when converged; a run capped by polish_steps ends on
+    "max_steps" (or "stall"). The polish stall test asks for 0.5 % over the last stall_windows check
+    windows: a steady 0.3 % per window descent is a stall over one window but goes on over four; 0.1 %
+    per window is a stall either way. The default is four windows for complex128 and one (the old test)
+    for complex64, whose solves stop at the rounding floor."""
+    from twisted_bilayer.engine.ground_state import _stalled, precondition_polish
+
+    for rate, w1, w4 in ((0.003, True, False), (0.001, True, True), (0.01, False, False)):
+        hist = [(1 - rate) ** k for k in range(6)]
+        assert _stalled(hist, 1) is w1 and _stalled(hist, 4) is w4, rate
+    assert not _stalled([1.0, 0.999], 4)  # fewer windows than the span: never a stall
+
+    g = Grid((128,), (4.0,), device=CPU)
+    eng = BilayerGPE(g, lattice_1d(g, 8.0), g=0.2, n_components=1)
+    res = relax(eng, initial_state(eng, 4.0), 4.0, tol=1e-10, polish_steps=2000)
+    assert res.stop_reason == "tol" and "stopped on tol" in res.report()
+    capped = relax(eng, initial_state(eng, 4.0), 4.0, tol=1e-30, dt_schedule=[], polish_steps=100)
+    assert capped.stop_reason in ("max_steps", "stall", "tau_floor") and not bool(capped.converged.all())
+    e32 = eng.to_dtype(torch.complex64)
+    psi = initial_state(e32, 4.0)
+    out = {}
+    for w in (None, 1, 4):
+        info = {}
+        p, r, n = precondition_polish(e32, psi, 4.0, tol=0.0, max_steps=20000, stall_windows=w, info=info)
+        assert info["stop_reason"] in ("stall", "tau_floor") and n < 20000
+        out[w] = (n, p)
+    assert out[None][0] == out[1][0] and torch.equal(out[None][1], out[1][1])  # complex64 default: one window
+    assert out[4][0] >= out[1][0]

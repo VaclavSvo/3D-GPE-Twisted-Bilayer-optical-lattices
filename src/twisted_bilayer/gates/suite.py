@@ -42,6 +42,7 @@ import argparse
 import math
 import os
 import pathlib
+import platform
 import sys
 import time
 
@@ -983,6 +984,8 @@ def run_all(
         scenarios=ids,
         torch=torch.__version__,
         threads=torch.get_num_threads(),
+        platform=platform.platform(),
+        python=platform.python_version(),
         g2D_ER=G2D_ER,
         hbar_omega_z_ER=WZ_ER,
         J_prod_ER=er(J_PROD_CODE),
