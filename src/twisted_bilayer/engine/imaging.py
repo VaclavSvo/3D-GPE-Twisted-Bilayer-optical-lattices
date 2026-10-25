@@ -9,18 +9,29 @@ x_j = x0 + j dx with the AA point at the origin; lengths in a, densities in atom
 Contrast C = (S_AA - S_AB) / (S_AA + S_AB) of |2>, signed (+ = AA-bright), for these imaging models:
   raw     the moire envelope, n2 low-passed at |k| < pi/a (removes the atomic lattice) -- an ideal imager.
           The hard cutoff rings: its real-space kernel (an Airy amplitude) has negative lobes, so next to
-          sharp AA pockets the envelope can go below zero at nearly empty AB points and C_raw > 1.
-          `raw_ringing` flags S_raw_AB < 0 (or S_raw_AA < 0);
+          sharp AA pockets the envelope is pulled down at nearly empty AB points, below zero in the extreme
+          case (then C_raw > 1). `raw_ringing` flags only that extreme case, S_raw_AB < 0 (or S_raw_AA < 0):
+          a False flag does not make C_raw free of ringing (a contained 12 E_R cloud at Omega_R = J has
+          C_raw 0.998 against C_smooth 0.889 with the flag False);
   smooth  the same band limit |k| < pi/a with the incoherent optical transfer function of a circular pupil,
           W(k) = (2/pi) [arccos(k/k_c) - (k/k_c) sqrt(1 - (k/k_c)^2)], k_c = pi/a (the autocorrelation of a
           disc of radius k_c/2): its kernel is the Airy intensity |2 J1(u)/u|^2 >= 0, so the envelope of a
           non-negative density stays non-negative and |C_smooth| <= 1. It weights the moire harmonics below
           pi/a by W(k) < 1, so C_smooth is not C_raw: it is the raw envelope without the ringing;
   coh     coherent absorption imaging: the amplitude pupil NA = 0.69 with the probe push at saturation
-          s (tof.coherent_transfer_k). Compare this one, or C_raw where raw_ringing is False, with data;
+          s (tof.coherent_transfer_k). This is the one to compare with data. Its pupil is a hard cut too,
+          so next to sharp pockets C_coh can also exceed 1; no flag is set for it;
   psf     the legacy incoherent Gaussian PSF (sigma = 0.625 a) on 0.32 um pixels; kept for comparison.
 S_AA, S_AB are averages over the AA / AB points of a supercell box, or the central AA point and its
 four AB corners on a larger (trapped-cloud) box. Every evaluation is exact in Fourier space.
+
+Box dependence (trapped clouds): the hard cuts of C_raw and C_coh act on the box's own k-grid (spacing
+2 pi / L), and which grid points fall inside |k| < k_c changes with the box. For one and the same contained
+cloud they therefore move at the 1e-3 level from one box size to the next (box 7 against box 9 at 12 E_R,
+Omega_R = 1: C_raw 1.00326 / 1.00256, C_coh 0.98399 / 0.98517), while n_AA and mu agree to 1e-8 and
+C_smooth, whose transfer goes to zero continuously at k_c, moves by 1e-4. A change of C_raw or C_coh below
+~1e-3 between two box sizes is not a property of the cloud: compare boxes with C_smooth. Differences within
+one run (3D - NPSE on the same grid) are not affected.
 
 An independent quasi-2D split-step solver using the same definitions gives identical numbers.
 """

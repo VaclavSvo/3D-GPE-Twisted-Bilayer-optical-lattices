@@ -18,8 +18,9 @@ an energy difference of order theta^2 / L^2 (see `engine.observables`).
 tolerance (absolute, in the observable's units), and checks that every finer resolution also is. Only
 converged rows count: a row whose solve stopped above its residual tolerance (`converged` False) ends the
 walk, because an unconverged state can land near the finest value by chance; if the finest row itself is
-unconverged nothing is reported as needed. Rows without a `converged` entry (records written before it
-existed) count as converged.
+unconverged nothing is reported as needed. A trapped row whose cloud is not contained in its box
+(`checks.contained` False) ends the walk the same way. Rows without a `converged` entry (records written
+before it existed) count as converged. The trapped rows all run on one box (`trapped_convergence`).
 """
 
 from __future__ import annotations
@@ -75,13 +76,26 @@ def supercell_convergence(
 ) -> dict:
     """The homogeneous supercell at each points_per_a (the grid rounds up to an FFT-friendly size, so the
     actual points per a are reported). Returns dict(V0 -> list of rows), each row dict(ppa, N, ppa_actual,
-    seconds, values = {key: (n_Omega,) array}), plus Omega_R."""
+    seconds, values = {key: (n_Omega,) array}), plus Omega_R and skipped_ppa: the nominal ppa values whose grid
+    N is that of a lower one, which are not run (they would repeat its row)."""
+    from .lattice import moire_geometry
     from .sweep import SweepSpec, coupling_scan
 
+    # two nominal resolutions can round to the same FFT-friendly N: the second would repeat the first row and
+    # make `needed` report the lower nominal value, so only the first ppa of each N is run
+    geo, by_N, skipped = moire_geometry(m, n), {}, []
+    for ppa in sorted(float(p) for p in ppa_list):
+        N = geo.grid_size(ppa)
+        if N in by_N:
+            skipped.append(dict(ppa=ppa, N=N, same_as_ppa=by_N[N]))
+        else:
+            by_N[N] = ppa
+    if verbose and skipped:
+        print("  skipped (same grid as a lower ppa): " + ", ".join(f"{d['ppa']:g} (N = {d['N']})" for d in skipped))
     out = {}
     for V0 in V0_list:
         rows = []
-        for ppa in sorted(ppa_list):
+        for ppa in by_N.values():
             spec = SweepSpec(
                 V0=float(V0),
                 Omega_R=tuple(Omega_R),
@@ -118,19 +132,34 @@ def supercell_convergence(
                 )
         out[float(V0)] = rows
     return dict(
-        rows=out, Omega_R=tuple(float(o) for o in Omega_R), m=m, n=n, filling=filling, vertical=vertical, tol=tol
+        rows=out,
+        Omega_R=tuple(float(o) for o in Omega_R),
+        m=m,
+        n=n,
+        filling=filling,
+        vertical=vertical,
+        tol=tol,
+        skipped_ppa=skipped,
     )
 
 
 def trapped_convergence(spec: TR.TrappedSpec, cell_points_list, verbose: bool = False) -> dict:
-    """The trapped cloud (2D NPSE, complex128) at each cell_points (points per supercell side). Returns
-    dict(rows = list of dict(cell_points, ppa, N, seconds, residual, steps, values = {key: float}))."""
+    """The trapped cloud (2D NPSE, complex128) at each cell_points (points per supercell side), all on one
+    box: the coarsest row settles it under the spec's containment policy (so "enlarge" may widen it there),
+    every finer row runs on that box with containment "refuse" ("warn" if the spec says "warn") -- a row is
+    never solved on a different box from the others. Returns dict(rows = list of dict(cell_points, ppa, N, seconds, residual, converged,
+    steps, stop_reason, box_cells, edge_density_rel, containment, checks, values = {key: float}), spec,
+    box_cells)."""
     _, geo = TR.supercell_grid(spec)
     rows = []
-    for cp in sorted(int(c) for c in cell_points_list):
+    box = None
+    for cp in sorted({int(c) for c in cell_points_list}):  # a repeated cell_points would repeat its row
         s = replace(spec, cell_points=cp, dtype="complex128", vertical="npse")
+        if box is not None:  # pinned; "warn" stays "warn" (the rows are flagged by their checks), else refuse
+            s = replace(s, box_cells=box, containment="warn" if spec.containment == "warn" else "refuse")
         t0 = time.perf_counter()
         run = TR.trapped_ground_state(s, verbose=False)
+        box = int(run["spec"].box_cells)
         synchronize()
         sec = time.perf_counter() - t0
         eng, psi, r = run["engine"], run["psi"], run["result"]
@@ -156,8 +185,13 @@ def trapped_convergence(spec: TR.TrappedSpec, cell_points_list, verbose: bool = 
                 residual=float(r.residual[0]),
                 converged=bool(r.converged[0]),
                 steps=int(r.steps),
-                box_cells=int(run["spec"].box_cells),
+                stop_reason=r.stop_reason,
+                box_cells=box,
                 edge_density_rel=float(cloud["edge_density_rel"]),
+                containment=run["containment"],
+                checks=TR.checks(
+                    cloud["edge_density_rel"], bool(r.converged[0]), float(r.residual[0]), s.dtype, r.stop_reason
+                ),
                 values=values,
             )
         )
@@ -169,7 +203,7 @@ def trapped_convergence(spec: TR.TrappedSpec, cell_points_list, verbose: bool = 
                 flush=True,
             )
         del run, eng, psi, r
-    return dict(rows=rows, spec=spec)
+    return dict(rows=rows, spec=spec, box_cells=box)
 
 
 _W = max(len(k) for k in SUPERCELL_KEYS) + 2  # column width of the supercell table
@@ -186,7 +220,8 @@ def differences(rows, keys) -> list[dict]:
 
 
 def _converged(row) -> bool:
-    return bool(row.get("converged", True))
+    """A row that counts: its solve converged and (trapped rows) its cloud is contained in its box."""
+    return bool(row.get("converged", True)) and bool(row.get("checks", {}).get("contained", True))
 
 
 def needed(rows, keys, res_key: str, tolerances: dict | None = None) -> dict:
@@ -209,13 +244,15 @@ def needed(rows, keys, res_key: str, tolerances: dict | None = None) -> dict:
 
 
 def unconverged(rows, res_key: str) -> list:
-    """The resolutions of the rows whose solve stopped above its residual tolerance."""
+    """The resolutions of the rows that do not count: the solve stopped above its residual tolerance, or
+    (trapped rows) the cloud is not contained."""
     return [r[res_key] for r in rows if not _converged(r)]
 
 
 def _needed_text(rows, nd, k, res_key: str, fmt=str) -> str:
     """'<resolution>' if found; otherwise why not: '> <second finest>' when an observable is not converged in
-    resolution, 'blocked by an unconverged row at <r>' when the walk stopped at an unconverged row."""
+    resolution, 'blocked by an unconverged row at <r>' when the walk stopped at a row that does not count
+    (unconverged, or not contained)."""
     if nd[k] is not None:
         return fmt(nd[k])
     if not _converged(rows[-1]):
@@ -279,6 +316,13 @@ def table_rows(conv_sc: dict | None, conv_tr: dict | None) -> tuple[list[dict], 
                 dict(cell_points=r["cell_points"], ppa=r["ppa"], N=r["N"])
                 | dict(r["values"])
                 | dict(residual=r["residual"], steps=r["steps"], seconds=r["seconds"])
+                | dict(
+                    converged=r.get("converged"),
+                    stop_reason=r.get("stop_reason"),
+                    box_cells=r.get("box_cells"),
+                    contained=r.get("checks", {}).get("contained"),
+                    edge_density_rel=r.get("edge_density_rel"),
+                )
             )
     return sc, tr
 
@@ -313,8 +357,9 @@ def report(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | None =
         rows = conv_tr["rows"]
         diffs = differences(rows, TRAPPED_KEYS)
         s = conv_tr["spec"]
-        b = rows[-1].get("box_cells", s.box_cells)
-        lines.append(f"trapped cloud: box {b}x{b}, N = {s.N_atoms:g}, nu_r = {s.nu_r_hz:g} Hz, NPSE; |value - finest|")
+        boxes = sorted({r.get("box_cells", s.box_cells) for r in rows})
+        b = "/".join(f"{x}x{x}" for x in boxes)  # one box since rows share it; older records may differ
+        lines.append(f"trapped cloud: box {b}, N = {s.N_atoms:g}, nu_r = {s.nu_r_hz:g} Hz, NPSE; |value - finest|")
         lines.append(
             f"  {'cell':>6s}{'pts/a':>7s}{'N':>6s}" + "".join(f"{k:>11s}" for k in TRAPPED_KEYS) + f"{'s':>6s}"
         )
@@ -323,10 +368,15 @@ def report(conv_sc: dict | None, conv_tr: dict | None, tolerances: dict | None =
                 f"  {r['cell_points']:>6d}{r['ppa']:>7.2f}{r['N']:>6d}"
                 + "".join(f"{d[k]:>11.1e}" for k in TRAPPED_KEYS)
                 + f"{r['seconds']:>6.0f}"
-                + ("" if _converged(r) else f"  NOT CONVERGED (residual {r['residual']:.1e})")
+                + ("" if r.get("converged", True) else f"  NOT CONVERGED (residual {r['residual']:.1e})")
+                + (
+                    ""
+                    if r.get("checks", {}).get("contained", True)
+                    else f"  NOT CONTAINED (edge density / peak {r['edge_density_rel']:.1e})"
+                )
             )
         if not _converged(rows[-1]):
-            lines.append("  the finest row is not converged: no resolution is reported as needed")
+            lines.append("  the finest row is not converged (or not contained): no resolution is reported as needed")
         fin = rows[-1]["values"]
         lines.append("  finest: " + ", ".join(f"{k} {fin[k]:.8g}" for k in TRAPPED_KEYS))
         nd = needed(rows, TRAPPED_KEYS, "cell_points", tolerances)

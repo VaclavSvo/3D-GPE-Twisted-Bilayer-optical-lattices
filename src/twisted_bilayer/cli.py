@@ -59,8 +59,13 @@ def _cmd_panel(a) -> int:
             flags = ", ".join(f for f, on in (("checkout", s.needs_checkout), ("GPU", s.needs_gpu)) if on)
             print(f"{s.name:<14s} {s.what}" + (f"  [needs {flags}]" if flags else ""))
         return 0
-    only = [x.strip() for x in a.only.split(",")] if a.only else None
-    skip = [x.strip() for x in a.skip.split(",")] if a.skip else None
+    only = [x.strip() for x in a.only.split(",") if x.strip()] if a.only else None
+    skip = [x.strip() for x in a.skip.split(",") if x.strip()] if a.skip else None
+    try:
+        panel.select_steps(a.name, only, skip)
+    except ValueError as e:  # a usage error: nothing runs and nothing is written
+        print(f"twisted-bilayer panel: {e}", file=sys.stderr)
+        return 2
     return panel.run_panel(a.name, out_root=a.out, only=only, skip=skip)
 
 

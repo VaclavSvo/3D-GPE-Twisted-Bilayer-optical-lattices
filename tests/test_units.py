@@ -16,7 +16,7 @@ from twisted_bilayer.engine import units
 
 
 def test_constants_come_from_parameters():
-    assert units.HBAR is P.HBAR_SI or units.HBAR == P.HBAR_SI
+    assert units.HBAR is P.HBAR_SI
     assert units.U_ATOMIC_MASS == P.AMU_SI
     assert units.BOHR_RADIUS == P.A0_SI and units.A_LATTICE_M == P.A_LATTICE_SI
     assert units.NU_Z_HZ == P.NU_Z_HZ and units.E_R_CODE == P.E_R_CODE == math.pi**2 / 2

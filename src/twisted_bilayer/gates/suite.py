@@ -26,14 +26,18 @@ lengths and densities identical):
      N = 2000, J = 0.24277 E_R, NPSE lambda = 1, 20 Hz, 3 x 3 cells at 8 pts/a, g2D = parameters.G2D_ER;
      C_raw, C_coh (s = 0.01) and R_rms vs the anchors of an independent quasi-2D split-step solver to 2e-3,
      the polish converged, N and N2/N conserved, the cloud inside the box;
-  D  pre-flight: kinetic phase per step of the engine's own choose_dt (order 2, and order 4 with the
+  D  pre-flight: the NPSE parameter kappa = g2D n_peak / hbar omega_z at nbar = 1. The nbar = 5 value
+     (expected 1.31 > 0.8, a model-validity flag) is recorded in meta as an expected-FAIL demonstration, not
+     counted. The kinetic phase per step of the engine's own choose_dt (order 2, and order 4 with the
      `rabi_quick` scenario's multiplier 20 -- outer step and largest Yoshida sub-step), the identity
-     kappa k2_max dt (E_R units) = k2_max dt / 2 (code units), lattice resolution, and the NPSE
-     parameter kappa = g2D n_peak / hbar omega_z at nbar = 1. The nbar = 5 value (expected 1.31 > 0.8,
-     a model-validity flag) is recorded in meta as an expected-FAIL demonstration, not counted.
+     kappa k2_max dt (E_R units) = k2_max dt / 2 (code units) and the lattice resolution are recorded in
+     values["D"] and checked by tests/test_gates.py: they follow from choose_dt's constants.
 
-Device: CPU by default (TWISTED_BILAYER_FORCE_CPU=1 is set before the engine is imported); --device cuda
-needs a CUDA build of torch.
+Device: `twisted-bilayer gates` and `python -m twisted_bilayer.gates` (both through cli.py) set
+TWISTED_BILAYER_FORCE_CPU=1 before the engine is imported unless --device cuda is given, so they run on the CPU
+by default; --device cuda needs a CUDA build of torch. `python -m twisted_bilayer.gates.suite` imports the engine
+before it reads the command line and runs on the device the engine was imported on unless --device names one
+(a mismatch is an error; set TWISTED_BILAYER_FORCE_CPU=1 to run it on the CPU of a GPU machine).
 """
 
 from __future__ import annotations
@@ -342,7 +346,8 @@ def gate_A2_ho_breathing(suite: GateSuite, ctx: Context) -> dict:
     period = fit_period(ts, r2, 2.0 * w * 1.02)
     tag = "A2 HO breathing"
     suite.add(value_gate(f"{tag}: period of <r^2>(t) vs 2 pi / 2 omega", period, t_er(c["period"]), 1e-3))
-    for g in tagged(H.conservation_gates(hist, tol_norm=1e-9, tol_energy=1e-7, J_perp=0.0), tag):
+    # one component: no N2/N gate (N2_over_N is written as 0.0 every frame, a gate on it cannot fail)
+    for g in tagged(H.conservation_gates(hist, tol_norm=1e-9, tol_energy=1e-7), tag):
         suite.add(g)
     return dict(period=period, period_ref=t_er(c["period"]))
 
@@ -389,7 +394,8 @@ def gate_A3_free_expansion(suite: GateSuite, ctx: Context) -> dict:
             None,
         )
     )
-    for g in tagged(H.conservation_gates(hist, tol_norm=1e-9, tol_energy=1e-7, J_perp=0.0), tag):
+    # one component: no N2/N gate (N2_over_N is written as 0.0 every frame, a gate on it cannot fail)
+    for g in tagged(H.conservation_gates(hist, tol_norm=1e-9, tol_energy=1e-7), tag):
         suite.add(g)
     return dict(max_err=max(errs))
 
@@ -719,7 +725,9 @@ def gate_B10_reversibility(suite: GateSuite, ctx: Context) -> dict:
 
 def gate_C11_band_bottom(suite: GateSuite, ctx: Context) -> dict:
     """[anchor] dressed band bottom E0(J) at g = 0 on the pinned 176^2 grid: 14.17705565 code =
-    2.872872 E_R at J = 1.19802 code (0.12138 E_R in --full too)."""
+    2.872872 E_R at J = 1.19802 code (0.12138 E_R in --full too), one anchor gate and the residual per J.
+    parameters.E0_BAND_BOTTOM holds the same literals and the E_R anchor is the code anchor over E_R_CODE;
+    tests/test_gates.py checks both (as gates they compared one number with itself)."""
     out = {}
     Js = [("dressed_band_bottom_J0.2428_code", J_PROD_CODE)]
     if not ctx.quick:
@@ -732,12 +740,6 @@ def gate_C11_band_bottom(suite: GateSuite, ctx: Context) -> dict:
         tag = f"C11 dressed band bottom J={Jc:g} code, g = 0, 176^2"
         v, tol, _ = R.anchor(name)
         suite.add(value_gate(f"{tag}: E0 x E_R_CODE vs anchor", E0 * ER, v, tol, kind="anchor"))
-        suite.add(
-            value_gate(f"{tag}: E0 vs parameters.E0_BAND_BOTTOM", E0 * ER, P.E0_BAND_BOTTOM[Jc], tol, kind="anchor")
-        )
-        if Jc == J_PROD_CODE:
-            v2, tol2, _ = R.anchor("dressed_band_bottom_J0.2428_ER")
-            suite.add(value_gate(f"{tag}: E0 vs the 2.872872 E_R anchor", E0, v2, tol2, kind="anchor", unit=" E_R"))
         for g in residual_gate(tag, float(r.residual[0]), 1e-10):
             suite.add(g)
         out[Jc] = E0
@@ -814,40 +816,37 @@ def gate_C12_C13_mu_contrast(suite: GateSuite, ctx: Context) -> dict:
     return out
 
 
+def choose_dt_values(eng, psi) -> dict:
+    """The real-time step that `choose_dt` picks for `eng` at order 2 and at order 4 with the `rabi`
+    multiplier 20, and what it implies: dt (E_R), the kinetic phase per step kappa k2_max dt in E_R units and
+    k2_max dt / 2 in code units (`references.kinetic_phase_per_step`; the same number), the largest Yoshida
+    sub-step theta_Y dt of order 4, and the grid's Nyquist wavenumber against twice the lattice's 2 pi.
+    These follow from choose_dt's constants (the outer phase is capped at 1.5 rad), not from a run, so
+    tests/test_gates.py checks them (phase and sub-step < 2.6 rad, the identity to 1e-12, k_Nyq > 4 pi) and
+    gate D only records them."""
+    dx = eng.grid.dx
+    theta_y = 1.0 / (2.0 - 2.0 ** (1.0 / 3.0))
+    out = dict(k_nyquist=min(math.pi / d for d in dx), k_lattice=2.0 * math.pi)
+    for order, mult in ((2, 1.0), (4, 20.0)):
+        dt = phys.choose_dt(eng, psi, order=order, order4_multiplier=mult)
+        ph = eng.kappa * eng.grid.k_sq_max * dt
+        out[f"order{order}_dt_ER"], out[f"order{order}_phase"] = dt, ph
+        out[f"order{order}_phase_code"] = R.kinetic_phase_per_step(None, P.t_er_to_code(dt), dx)
+        if order == 4:
+            out["order4_substep_phase"] = theta_y * ph
+    return out
+
+
 def gate_D_preflight(suite: GateSuite, ctx: Context) -> dict:
-    """[preflight] The engine's own real-time step on the production supercell (176^2): kinetic phase
-    per step for choose_dt at order 2 and at order 4 with the `rabi` multiplier 20 (outer step and the
-    largest Yoshida sub-step theta_Y dt), the E_R <-> code identity of that phase, lattice resolution,
-    and the NPSE parameter kappa at nbar = 1 (gate) and nbar = 5 (expected-FAIL demonstration in meta)."""
+    """[preflight] The NPSE parameter kappa = g2D n_peak / hbar omega_z at nbar = 1 (gate) and nbar = 5
+    (expected-FAIL demonstration in meta), and, recorded in values only, the engine's own real-time step on
+    the production supercell (176^2): `choose_dt_values` at order 2 and at order 4 with the `rabi` multiplier
+    20. Those were gates until 24 Oct; they test choose_dt's constants, not the run, and moved to
+    tests/test_gates.py."""
     c = twisted_cell_case(ppa=8)
     eng, r = ctx.ground(176, er(c["J"]), 1.0, "fixed")
     dx = eng.grid.dx
-    out = {}
-    theta_y = 1.0 / (2.0 - 2.0 ** (1.0 / 3.0))
-    for order, mult in ((2, 1.0), (4, 20.0)):
-        dt = phys.choose_dt(eng, r.psi, order=order, order4_multiplier=mult)
-        ph = eng.kappa * eng.grid.k_sq_max * dt
-        ph_ref = R.kinetic_phase_per_step(None, P.t_er_to_code(dt), dx)
-        tag = f"D engine choose_dt order {order}" + (f" (multiplier {mult:g})" if order == 4 else "")
-        for g in tagged(H.preflight_gates(dx, P.t_er_to_code(dt), phase_max=2.6, k_char=2.0 * math.pi), tag):
-            suite.add(g)
-        suite.add(value_gate(f"{tag}: kappa k2max dt (E_R) vs k2max dt/2 (code)", ph, ph_ref, 1e-12, kind="preflight"))
-        if order == 4:
-            sub = theta_y * ph
-            suite.add(
-                GateResult(
-                    f"{tag}: largest Yoshida sub-step theta_Y dt",
-                    sub < 2.6,
-                    f"{sub:.3f} rad (outer step {ph:.3f} rad; the cap 1.5 rad applies to the outer step; "
-                    f"the split step is unstable near pi)",
-                    "preflight",
-                    sub,
-                    math.pi,
-                    2.6,
-                )
-            )
-            out["order4_substep_phase"] = sub
-        out[f"order{order}_dt_ER"], out[f"order{order}_phase"] = dt, ph
+    out = choose_dt_values(eng, r.psi)
     demo = {}
     for nbar in (1.0, 5.0):
         e, rn = ctx.ground(88, er(c["J"]), nbar, "npse")
@@ -970,6 +969,11 @@ def run_all(
     if threads:
         torch.set_num_threads(int(threads))
     every = ALL_IDS + TRAPPED_IDS  # E (trapped) on request
+    if only is not None:
+        unknown = sorted(set(only) - set(every))
+        if unknown or not only:
+            what = f"unknown scenario id(s) {', '.join(unknown)}" if unknown else "no scenario id"
+            raise ValueError(f"--only: {what}; valid ids: {', '.join(every)}")
     ids = (
         (list(ALL_IDS) + (list(TRAPPED_IDS) if trapped else []))
         if only is None
@@ -1021,21 +1025,31 @@ def main(argv=None) -> int:
     ap.add_argument("--full", action="store_true", help="C12/C13 anchors on the pinned 176^2 grid")
     ap.add_argument("--trapped", action="store_true", help="add scenario E, the N = 2000 trapped cloud (~10 min CPU)")
     ap.add_argument("--only", default=None, help="comma-separated scenario ids, e.g. A1,A3,B8")
-    ap.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
+    ap.add_argument(
+        "--device",
+        default=None,
+        choices=["cpu", "cuda"],
+        help="default: the device the engine was imported on (`twisted-bilayer gates` imports it on the CPU "
+        "unless --device cuda)",
+    )
     ap.add_argument("--threads", type=int, default=None, help="torch CPU threads (default: torch's choice)")
     ap.add_argument("--quiet", action="store_true")
     a = ap.parse_args(argv)
     only = None if a.only is None else {s.strip() for s in a.only.split(",") if s.strip()}
+    device = a.device or ("cuda" if backend.HAS_GPU else "cpu")
     t0 = time.perf_counter()
-    suite = run_all(
-        a.out,
-        quick=not a.full,
-        only=only,
-        verbose=not a.quiet,
-        device=a.device,
-        threads=a.threads or os.cpu_count(),
-        trapped=a.trapped,
-    )
+    try:
+        suite = run_all(
+            a.out,
+            quick=not a.full,
+            only=only,
+            verbose=not a.quiet,
+            device=device,
+            threads=a.threads or os.cpu_count(),
+            trapped=a.trapped,
+        )
+    except ValueError as e:  # an unknown --only id: a usage error (exit code 2), not an empty pass
+        ap.error(str(e))
     print(suite.report())
     demo = suite.meta.get("preflight_demo_expected_FAIL")
     if demo:
@@ -1044,7 +1058,7 @@ def main(argv=None) -> int:
         )
     print(f"({len(suite.results)} gates, {time.perf_counter() - t0:.0f} s, {suite.meta['device']})")
     if a.out:
-        print(f"wrote {pathlib.Path(a.out) / ('gates' + ('' if a.device == 'cpu' else '_' + a.device) + '.json')}")
+        print(f"wrote {pathlib.Path(a.out) / ('gates' + ('' if device == 'cpu' else '_' + device) + '.json')}")
     return 0 if suite.passed else 1
 
 

@@ -7,7 +7,7 @@ of `trapped3d.solve_models` on 15 Oct 2026 (repo state of that day). Tolerances:
 solve converges the residual to ~5e-10), 1e-6 on densities and contrasts (device and FFT library).
 
 EXPERIMENT_3D: the experiment's cloud of `gpu_precision` (m = 22, 3 x 3 supercells at 176 points, N = 2000,
-20 Hz), complex128. Source: `gpu_precision` on a GTX 1660 Ti (N_z = 48) and an RTX 4070 Ti (N_z = 64),
+20 Hz), complex128. Source: `gpu_precision` on two different GPUs (N_z = 48 and N_z = 64),
 15 Oct 2026, identical in every printed digit. Tolerances cover the printed rounding (8 decimals on energies,
 5 on contrasts) and, for the 3D cloud, a coarser N_z (the panel runs N_z = 32; `gpu_3d_nz` puts N_z >= 16
 within the complex64 floor).

@@ -46,7 +46,7 @@ class RelaxResult:
     converged: torch.Tensor  # (B,) bool
     steps: int = 0
     stages: list = field(default_factory=list)  # (dt, steps, max residual) per stage
-    stop_reason: str = ""  # why the last stage ended: "tol", "stall", "max_steps", "tau_floor" or "ladder"
+    stop_reason: str = ""  # why the last stage ended: "tol", "stall", "slow", "max_steps", "tau_floor" or "ladder"
 
     def report(self) -> str:
         lines = [f"  stage dt={dt:.3g}: {n} steps, max residual {r:.2e}" for dt, n, r in self.stages]
@@ -258,6 +258,38 @@ def _stalled(hist: list, windows: int) -> bool:
     return len(hist) > windows and hist[-1] > 0.995 * hist[-1 - windows]
 
 
+def _too_slow(hist: list, windows: int, windows_left: float, tol: float) -> bool:
+    """True when the residual has fallen by less than 0.5 % per window on average over the last `windows`
+    check windows (the one-window stall threshold) and, at that rate, would still be above tol after
+    `windows_left` more windows. Extrapolated at its present rate, such a descent ends unconverged; stopping
+    it saves the rest of the step budget. A descent faster than 0.5 % per window always goes on (as with the one-window
+    test), and so does a slower one that can still reach tol in the budget."""
+    if len(hist) <= windows or hist[-1 - windows] <= 0.0:
+        return False
+    q = (hist[-1] / hist[-1 - windows]) ** (1.0 / windows)
+    if not 0.995 < q < 1.0:  # faster than the one-window threshold, or not falling (the stall test's case)
+        return False
+    return hist[-1] * q ** max(windows_left, 0.0) > tol
+
+
+_E_TERMS = ("E_kin", "E_pot", "E_int", "E_delta", "E_rabi")
+
+
+def _energy(engine: BilayerGPE, psi: torch.Tensor) -> tuple:
+    """(E_total, sum of |terms|) per batch member: the energy and the scale of its rounding error."""
+    t = engine.energy_terms(psi)
+    return t["E_total"], sum(t[k].abs() for k in _E_TERMS)
+
+
+def _energy_rose(E, E_prev, eps: float) -> bool:
+    """True when any batch member's total energy rose by more than its rounding level: 1e3 eps times the sum
+    of the magnitudes of its terms (so a total that cancels to ~0 keeps a meaningful scale). E, E_prev:
+    (E_total, scale) pairs as returned by `_energy`."""
+    (e, s), (e0, s0) = E, E_prev
+    e, s, e0, s0 = (torch.as_tensor(x, dtype=torch.float64).reshape(-1) for x in (e, s, e0, s0))
+    return bool(((e - e0) > 1e3 * eps * torch.maximum(s, s0)).any())
+
+
 def precondition_polish(
     engine: BilayerGPE,
     psi: torch.Tensor,
@@ -281,19 +313,42 @@ def precondition_polish(
     alpha defaults to the local energy scale (|V| + g n + Omega_R), which
     keeps the step stable for every k; the momentum is what beats the
     condition number: the lowest supercell modes (E ~ 0.01 E_R) relax at a
-    rate ~ tau E/alpha per step without it, ~ sqrt of that with it. When the
-    residual rises between two checks the momentum is reset and tau is
-    reduced (never below 1e-3 tau_0); the run stops at tol, at max_steps, or
-    when the residual has stopped falling: by less than 0.5 % over the last
-    `stall_windows` check windows (since the last restart). stall_windows = 1
-    is the one-window test, which also ends a slow but steady descent (soft modes
-    of a large cloud fall by ~0.1-0.3 % per window); with 4 a descent faster than
-    ~0.13 % per window goes on. Default (None): 4 for a complex128 engine, 1 for
-    a single-precision one, which stops at its rounding floor where a longer
-    window only costs steps (so every complex64 solve, and the complex64 first
-    stage of a two-precision solve, is unchanged by the longer window).
-    A passed `info` dict receives stop_reason ("tol", "stall", "max_steps",
-    "tau_floor")."""
+    rate ~ tau E/alpha per step without it, ~ sqrt of that with it.
+
+    Overshoot: when the residual rises between two checks the momentum is
+    reset, tau is halved (never below 1e-3 tau_0, stop_reason "tau_floor")
+    and the run restarts from the best state. In a complex128 engine one
+    rise of the residual while the total energy did not rise (by more than
+    1e3 eps times the sum of the magnitudes of its terms) is let through, and
+    that window is left out of the stall and rate tests: the descent lowers
+    E, not the residual, which can bump up at first order in tau on a state
+    that is still descending -- restarting there halves tau down to its
+    floor. A second rise in a row, or a rise in the first window after a
+    restart, is an overshoot whatever E does: an unstable mode grows the
+    residual by a factor per window while its energy stays below the
+    rounding level, and a state that rises right after a restart from the
+    best one is at a floor. Near the residual's own rounding level (below
+    1e4 eps alpha) the residual-only test applies in complex128 too: there a
+    rise is rounding noise, and halving tau is what lowers the floor. A
+    single-precision engine keeps the residual-only test throughout (its
+    energy changes near the rounding floor are below its precision), so
+    every complex64 solve is unchanged.
+
+    Stop: at tol, at max_steps, or when the residual has stopped falling: by
+    less than 0.5 % over the last `stall_windows` check windows (since the
+    last restart; "stall"). stall_windows = 1 is the one-window test, which
+    also ends a slow but steady descent (soft modes of a large cloud fall by
+    ~0.1-0.3 % per window); with 4 a descent faster than ~0.13 % per window
+    goes on, but only while it can still reach tol: in a complex128 engine a
+    descent slower than 0.5 % per window (over the same span) that, at its
+    present rate, would still be above tol at max_steps stops at once
+    ("slow"; an extrapolation from the last stall_windows windows; not near
+    the rounding level, where the stall test decides). Default
+    (None): 4 for a complex128 engine, 1 for a single-precision one, which
+    stops at its rounding floor where a longer window only costs steps (so
+    every complex64 solve, and the complex64 first stage of a two-precision
+    solve, is unchanged). A passed `info` dict receives stop_reason ("tol", "stall",
+    "slow", "max_steps", "tau_floor")."""
     g = engine.grid
     if alpha is None:
         alpha = max(local_energy_scale(engine, psi), 1e-3)
@@ -304,9 +359,15 @@ def precondition_polish(
     if stall_windows is None:
         stall_windows = 4 if engine.dtype == torch.complex128 else 1
     stall_windows = max(1, int(stall_windows))
+    energy_test = engine.dtype == torch.complex128
+    eps = float(torch.finfo(engine.rdtype).eps)
+    floor = 1e4 * eps * float(torch.as_tensor(alpha).max())  # the residual's rounding level: below it the
+    # residual-only rules apply in complex128 too
+    E_prev = _energy(engine, psi) if energy_test else None
     tau0 = tau
     v = torch.zeros_like(psi)
-    psi_best, res_best = psi, res
+    psi_best, res_best, E_best = psi, res, E_prev
+    bumped = False  # the last window's residual rose while E fell (tolerated once)
     n = 0
     reason = "max_steps"
     while n < max_steps:
@@ -319,28 +380,47 @@ def precondition_polish(
         n += check_every
         res = engine.residual(psi)
         cur = float(res.max())
+        E_cur = _energy(engine, psi) if energy_test else None
         if verbose:
             print(f"  polish {n} steps: max residual {cur:.2e} (tau {tau:.3g})")
         if cur < float(res_best.max()):
-            psi_best, res_best = psi, res
+            psi_best, res_best, E_best = psi, res, E_cur
         if cur < tol:
             reason = "tol"
             break
-        if cur > prev:  # overshoot: restart from the best state
-            psi, res = psi_best, res_best
-            v = torch.zeros_like(psi)
-            tau *= 0.5
-            if tau < 1e-3 * tau0:
-                reason = "tau_floor"
-                break
-            prev = float(res.max())
-            hist = [prev]
-            continue
+        if cur > prev:
+            if energy_test and not bumped and cur > floor and not _energy_rose(E_cur, E_prev, eps):
+                # one rise of the residual while E did not rise: go on, and leave this window out of the
+                # stall and rate tests (they compare residuals, and a bump is not a stall)
+                bumped = True
+                prev, E_prev = cur, E_cur
+                continue
+            else:  # overshoot (E rose too, or the residual rose twice running): restart from the best state
+                psi, res, E_prev = psi_best, res_best, E_best
+                v = torch.zeros_like(psi)
+                tau *= 0.5
+                bumped = True  # after a restart a rise is an overshoot at once (the best state is a floor)
+                if tau < 1e-3 * tau0:
+                    reason = "tau_floor"
+                    break
+                prev = float(res.max())
+                hist = [prev]
+                continue
+        else:
+            bumped = False
         hist.append(cur)
         if _stalled(hist, stall_windows):
             reason = "stall"
             break
-        prev = cur
+        if (
+            energy_test
+            and stall_windows > 1
+            and cur > floor
+            and _too_slow(hist, stall_windows, (max_steps - n) / check_every, tol)
+        ):
+            reason = "slow"
+            break
+        prev, E_prev = cur, E_cur
     if info is not None:
         info["stop_reason"] = reason
     return psi_best, res_best, n

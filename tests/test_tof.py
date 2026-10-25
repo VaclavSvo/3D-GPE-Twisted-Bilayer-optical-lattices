@@ -126,7 +126,7 @@ def _talbot_field(N=384, eps=0.25, sqrt_form=False):
     X, Y = np.meshgrid(x, x)
     q = 2 * np.pi / tof.L_MOIRE
     b = tof.lattice_G(2)
-    b1, b2 = b[5], b[7]  # m=+1,n=0 / m=0,n=+1 ... any two independent vectors
+    b1, b2 = b[5], b[7]  # m=0,n=+1 / m=+1,n=0 ... any two independent vectors
     u = (1 + 0.458 * np.cos(b1[0] * X + b1[1] * Y)) * (1 + 0.458 * np.cos(b2[0] * X + b2[1] * Y))
     if sqrt_form:
         mo = np.sqrt(1 + 0.4 * np.cos(q * X) + 0.4 * np.cos(q * Y))
@@ -414,12 +414,79 @@ def test_pipeline_end_to_end():
     assert -1 < sc["C_sat"] < 1
 
 
+@pytest.mark.parametrize("g2D", [tof.G2D, 0.0])
+def test_pipeline_keeps_J_perp_on_through_the_tail(g2D):
+    """With J_perp != 0 the coupling acts for the whole t_tof (it used to stop at t1): the interaction is SU(2)
+    and the kinetic energy the same in both layers, so a cloud released in layer 1 images as cos^2(J t) (layer
+    1) and sin^2(J t) (layer 2) of the J = 0 image, pixel by pixel; also without a stage (g2D = 0)."""
+    psi, dx, org, N = _synthetic_a(L=64.0, R0=6.0)
+    one = np.stack([psi, 0 * psi]) * 2.0
+    J, t = 0.3, 12.0
+
+    def img(Jp, comp):
+        kw = dict(t_tof=t, t1=0.5, g2D=g2D, origin=org, image_component=comp, tail="mf", dt="auto", J_perp=Jp)
+        return tof.tof_pipeline(one, dx, tof.square_G(), **kw)["image"].img
+
+    ref = img(0.0, 0)
+    for comp, w in ((0, math.cos(J * t) ** 2), (1, math.sin(J * t) ** 2)):
+        err = np.abs(img(J, comp) - w * ref).max() / ref.max()
+        assert err < 1e-10, (comp, err)
+    o = tof.demodulate(one, dx, tof.square_G(), origin=org)
+    assert tof.spin_rotate_orders(o, J, 0.0) is o and tof.spin_rotate_orders(o, 0.0, t) is o
+
+
+def test_mf_tail_records_and_guards_its_high_k_weight():
+    """The comoving NLS of the tail is not limited by the kinetic phase per step (~30 rad here); its
+    split-step instability shows as growth of the weight at |k| > 0.75 k_Nyq, which is recorded per order and
+    raises above 10x. At the experiment's density the weight stays flat (~1e-13); a 30x denser cloud with
+    10x larger steps blows up (weight 0.66) and is refused."""
+    psi, dx, org, N = _synthetic_a(L=64.0, R0=6.0)
+    o = tof.demodulate(np.stack([psi, -psi]) * 2.0, dx, tof.square_G(), origin=org)
+    p = tof.propagate_orders(o, 12.0, g2D=tof.G2D).info["propagate"]
+    assert len(p["nls_highk"]) == len(p["nls_kin_phase_max"]) == sum(n > 0 for n in p["nls_steps"]) > 0
+    assert all(h1 < 10 * max(h0, 1e-14) and h1 < 1e-11 for h0, h1 in p["nls_highk"]), p["nls_highk"]
+    assert max(p["nls_kin_phase_max"]) > math.pi  # the step is not kinetic-phase limited, by design
+    dense = tof.Orders(
+        envs=[tof.Envelope(G=e.G, phi=3 * e.phi, x0=e.x0, y0=e.y0, dx=e.dx, dy=e.dy) for e in o.envs], t=o.t
+    )
+    kw = dict(g2D=10 * tof.G2D, dphi=0.5, dt_max=2.0)
+    with pytest.raises(RuntimeError, match="high-k weight"):
+        tof.propagate_orders(dense, 12.0, **kw)
+    bad = tof.propagate_orders(dense, 12.0, highk_check="off", **kw).info["propagate"]["nls_highk"]
+    assert max(h1 for _, h1 in bad) > 0.1
+
+
+def test_degenerate_inputs_fail_clearly_and_resampling_keeps_real_fields_real():
+    """A zero field, zero-norm orders and an all-NaN image are clear ValueErrors (they were numpy errors or
+    NaN); zero padding splits the even grid's Nyquist coefficient, so the band-limited interpolant of the
+    real cos(pi x / dx) is real (it had an imaginary part of 1)."""
+    from twisted_bilayer.tof import tof as tof_module
+
+    x = np.arange(8.0)
+    f = (np.cos(np.pi * x)[None, :] * np.cos(np.pi * x)[:, None]).astype(complex)
+    g, (dxn, dyn), drop = tof.fourier_resample(f, 1.0, (16, 16))
+    xf = 0.5 * np.arange(16)
+    assert dxn == dyn == 0.5 and drop == 0.0
+    assert np.abs(g - np.cos(np.pi * xf)[None, :] * np.cos(np.pi * xf)[:, None]).max() < 1e-13
+    smooth = np.exp(-((x - 3.5) ** 2) / 4)[None, :] * np.ones((8, 1))
+    g2, _, _ = tof.fourier_resample(smooth.astype(complex), 1.0, (16, 16))
+    assert np.abs(g2[::2, ::2] - smooth).max() < 1e-13  # the original samples are kept
+    with pytest.raises(ValueError, match="zero or not finite"):
+        tof_module._support(np.zeros((1, 16, 16), complex), 0.5, 0.5, 1e-14, 1e-6)
+    env = tof.Envelope(G=np.zeros(2), phi=np.zeros((1, 4, 4), complex), x0=0.0, y0=0.0, dx=1.0, dy=1.0)
+    with pytest.raises(ValueError, match="total norm"):
+        tof.Orders(envs=[env, env]).weights()
+    assert len(tof.Orders(envs=[]).weights()) == 0
+    xc = np.arange(64) - 32.0
+    im = tof.TOFImage(img=np.full((64, 64), np.nan), xc=xc, yc=xc, pixel=1.0)
+    with pytest.raises(ValueError, match="no finite disk mean"):
+        tof.satellite_contrast(im, 16.0)
+    with pytest.raises(ValueError, match="no finite profile bin"):
+        tof.satellite_contrast_profile(im, 16.0, bin_width=4.0)
+
+
 def test_torch_backend():
-    try:
-        import torch
-    except Exception:
-        print("torch not installed: skipped")
-        return
+    torch = pytest.importorskip("torch")
     nthr = torch.get_num_threads()
     torch.set_num_threads(1)  # avoid OpenMP oversubscription on shared CPUs
     try:

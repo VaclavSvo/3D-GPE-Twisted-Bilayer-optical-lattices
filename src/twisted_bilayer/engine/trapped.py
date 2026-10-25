@@ -25,9 +25,12 @@ the nearest edge). Above R_TF = CONTAIN_REFUSE x half-width the cloud's tail rea
 smallest odd size with R_TF <= CONTAIN_TARGET x half-width at the same N and nu_r ("enlarge"), or runs it with
 a warning ("warn"). CONTAIN_REFUSE = 0.88 is calibrated on the experiment's cloud (N = 2000, 20 Hz, m = 22):
 R_TF / half-width 0.847 gives edge 2.7e-4 (the validated 3 x 3 reference), 0.870 gives 1.4e-4, 0.912
-gives 7.9e-3, 0.937 gives 1.3e-2 and 1.0 gives 0.13. A small cloud (R_TF of a few a) has a relatively longer
-tail and can fail the edge test below that line; after the solve, `checks` applies the edge criterion of the
-trapped-cloud gate (edge density / peak < 1e-3) to every model, which catches it.
+gives 7.9e-3, 0.937 gives 1.3e-2 and 1.0 gives 0.13. These are clouds of different nu_r and nu_z, not one
+cloud in growing boxes: the edge density depends on the shape of the tail as well as on the ratio, so the
+list is not monotone below the line (0.870 sits under 0.847); above ~0.9 every one of them fails. A small
+cloud (R_TF of a few a) has a relatively longer tail and can fail the edge test below that line; after the
+solve, `checks` applies the edge criterion of the trapped-cloud gate (edge density / peak < 1e-3) to every
+model, which catches it.
 
 Units: lattice units (a = 1, E_R = 1, hbar = 1); omega_r from Hz with units.lattice_units(). Fields are
 (B, C, Nx, Ny) torch tensors / (C, Nx, Ny) numpy arrays in grid order [ix, iy].

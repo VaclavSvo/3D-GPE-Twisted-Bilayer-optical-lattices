@@ -38,3 +38,28 @@ def test_twist_free_superfluid_fraction():
         # ... and the combination does not move (to O(theta^4))
         assert abs(f1 - f2) < 0.05 * abs(e1 - e2)
         assert a["fs_yy"][k] == pytest.approx(f1, abs=1e-6)  # C4 symmetry
+
+
+def test_saved_state_files(tmp_path):
+    """`SweepResult.save` with save_fields: each state file carries the total density n = n1 + n2 (not the
+    geometry index, which is stored as geometry_m, geometry_n), the component labels and the scan's Omega_R."""
+    import numpy as np
+
+    spec = SweepSpec(
+        V0=8.0,
+        Omega_R=(0.5,),
+        filling=1.0,
+        m=4,
+        n=1,
+        points_per_a=6.0,
+        theta=0.3,
+        dtype_relax="complex128",
+        dtype_polish="complex128",
+        save_fields=True,
+    )
+    coupling_scan(spec, verbose=False).save(str(tmp_path))
+    with np.load(tmp_path / "fields" / "state_OmegaR_0.5000.npz") as z:
+        assert z["n"].shape == z["n1"].shape and np.allclose(z["n"], z["n1"] + z["n2"], rtol=1e-6)
+        assert float(z["n"].mean()) == pytest.approx(1.0, rel=1e-5)  # filling 1 atom per a^2
+        assert int(z["geometry_m"]) == 4 and int(z["geometry_n"]) == 1
+        assert str(z["labels"]) == "paper" and float(z["Omega_R"]) == 0.5

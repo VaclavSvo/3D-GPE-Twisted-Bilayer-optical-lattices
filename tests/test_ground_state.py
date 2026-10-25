@@ -164,3 +164,128 @@ def test_stop_reason_and_stall_window():
         out[w] = (n, p)
     assert out[None][0] == out[1][0] and torch.equal(out[None][1], out[1][1])  # complex64 default: one window
     assert out[4][0] >= out[1][0]
+
+
+def _lattice_1d_engine():
+    g = Grid((128,), (4.0,), device=CPU)
+    return BilayerGPE(g, lattice_1d(g, 8.0), g=0.2, n_components=1)
+
+
+def test_complex128_default_is_four_stall_windows():
+    """The complex128 default (stall_windows=None) is the four-window stall test: on a residual falling by
+    0.3 % per window (synthetic, check windows of 5 steps) it runs as stall_windows=4 does, bit for bit, and
+    goes on to tol (it can reach it in the budget, so it is not "slow"); the one-window test stops it at the
+    first window."""
+    from twisted_bilayer.engine.ground_state import precondition_polish
+
+    seq = [1e-6 * 0.997**k for k in range(2000)]
+    out = {}
+    for w in (None, 1, 4):
+        eng = _lattice_1d_engine()
+        _synthetic_residual(eng, seq)
+        info = {}
+        p, r, n = precondition_polish(
+            eng, initial_state(eng, 4.0), 4.0, tol=1e-7, max_steps=40000, check_every=5, stall_windows=w, info=info
+        )
+        out[w] = (n, p, info["stop_reason"])
+    assert out[None][2] == out[4][2] == "tol" and out[None][0] == out[4][0] and torch.equal(out[None][1], out[4][1])
+    assert out[1][2] == "stall" and out[1][0] == 5
+
+
+def test_too_slow_rule():
+    """_too_slow: a descent slower than 0.5 % per window (averaged over the stall windows) that cannot
+    reach tol in the windows left; never for a faster descent, a rising residual, or a short history."""
+    from twisted_bilayer.engine.ground_state import _too_slow
+
+    slow = [1e-6 * 0.997**k for k in range(6)]  # 0.3 % per window
+    assert _too_slow(slow, 4, 100, 1e-9)  # 1e-6 * 0.997^100 ~ 7e-7 > tol
+    assert not _too_slow(slow, 4, 10000, 1e-9)  # 1e-6 * 0.997^10000 < tol: it can still get there
+    fast = [1e-6 * 0.99**k for k in range(6)]  # 1 % per window: always goes on
+    assert not _too_slow(fast, 4, 1, 1e-9)
+    assert not _too_slow([1e-6, 1e-6, 1.01e-6, 1.02e-6, 1.03e-6, 1.04e-6], 4, 1, 1e-9)  # rising: the stall test's
+    assert not _too_slow(slow[:4], 4, 1, 1e-9)  # not enough windows yet
+
+
+def _synthetic_residual(eng, seq):
+    """Replace eng.residual by the sequence seq (one value per call, as a (1,) tensor)."""
+    it = iter(seq)
+    eng.residual = lambda psi: torch.tensor([next(it)], dtype=torch.float64)
+
+
+def test_slow_descent_stops_when_tol_is_out_of_reach():
+    """A residual falling by 0.3 % per window: with tol out of reach in the step budget the complex128
+    polish stops after the stall windows ("slow"); with tol within reach it goes on and ends on tol."""
+    from twisted_bilayer.engine.ground_state import precondition_polish
+
+    seq = [1e-6 * 0.997**k for k in range(400)]
+    eng = _lattice_1d_engine()
+    _synthetic_residual(eng, seq)
+    info = {}
+    _, _, n = precondition_polish(eng, initial_state(eng, 4.0), 4.0, tol=5e-7, max_steps=4000, info=info)
+    assert info["stop_reason"] == "slow" and n == 4 * 50  # as soon as there are four windows to measure the rate
+    eng = _lattice_1d_engine()
+    _synthetic_residual(eng, seq)
+    info = {}
+    _, r, n = precondition_polish(eng, initial_state(eng, 4.0), 4.0, tol=8e-7, max_steps=4000, info=info)
+    assert info["stop_reason"] == "tol" and float(r.max()) < 8e-7 and 3000 < n < 4000
+
+
+def _bumped_residual(eng, bumps):
+    """eng.residual with call k multiplied by bumps[k] (a dict; call 1 is the start)."""
+    orig, calls = eng.residual, [0]
+
+    def residual(psi):
+        calls[0] += 1
+        return orig(psi) * bumps.get(calls[0], 1.0)
+
+    eng.residual = residual
+
+
+def test_one_residual_bump_with_falling_energy_is_not_an_overshoot():
+    """complex128: one window whose residual rises while E falls does not restart the polish (the run is
+    the same as without the bump, bit for bit); two rises in a row do (tau is halved: a different run).
+    complex64 keeps the residual-only test: one rise restarts it."""
+    from twisted_bilayer.engine.ground_state import precondition_polish
+
+    def run(dtype, bumps):
+        eng = _lattice_1d_engine().to_dtype(dtype)
+        _bumped_residual(eng, bumps)
+        info = {}
+        p, r, n = precondition_polish(eng, initial_state(eng, 4.0), 4.0, tol=1e-12, max_steps=4000, info=info)
+        return p, n, info["stop_reason"]
+
+    p0, n0, s0 = run(torch.complex128, {})
+    p1, n1, _ = run(torch.complex128, {4: 100.0})  # the descent falls ~10x per window: a 100x bump is a rise
+    assert s0 == "tol" and n1 == n0 and torch.equal(p1, p0)
+    p2, n2, _ = run(torch.complex128, {4: 100.0, 5: 1e4})  # the residual rises twice running
+    assert not (n2 == n0 and torch.equal(p2, p0))
+    q0, m0, _ = run(torch.complex64, {})
+    q1, m1, _ = run(torch.complex64, {4: 100.0})
+    assert not (m1 == m0 and torch.equal(q1, q0))
+
+
+def test_bump_late_in_a_descent_is_not_a_stall():
+    """complex128: a 10 % bump of the residual in the 13th window of a 2 %-per-window descent (synthetic) is
+    let through and left out of the stall test: the polish goes on to tol (it used to restart and halve tau)."""
+    from twisted_bilayer.engine.ground_state import precondition_polish
+
+    seq = [1e-6 * 0.98**k * (1.1 if k == 12 else 1.0) for k in range(400)]
+    eng = _lattice_1d_engine()
+    _synthetic_residual(eng, seq)
+    info = {}
+    _, r, n = precondition_polish(eng, initial_state(eng, 4.0), 4.0, tol=1e-7, max_steps=4000, check_every=5, info=info)
+    assert info["stop_reason"] == "tol" and float(r.max()) < 1e-7
+
+
+def test_energy_rose_rounding_level():
+    """The rounding level is 1e3 eps times the sum of the magnitudes of the terms, per batch member."""
+    from twisted_bilayer.engine.ground_state import _energy_rose
+
+    eps = torch.finfo(torch.float64).eps
+    E = torch.tensor([100.0, 200.0], dtype=torch.float64)
+    S = torch.tensor([300.0, 500.0], dtype=torch.float64)  # e.g. kinetic + potential + interaction, unsigned
+    assert not _energy_rose((E + 10 * eps * 500, S), (E, S), eps)  # rounding noise
+    assert _energy_rose((E + torch.tensor([0.0, 1e-9], dtype=torch.float64), S), (E, S), eps)  # one member rises
+    assert not _energy_rose((E - 1e-6, S), (E, S), eps)
+    zero = torch.zeros(2, dtype=torch.float64)  # a total that cancels to 0 keeps the terms' scale
+    assert not _energy_rose((zero + 1e-14, S), (zero, S), eps)

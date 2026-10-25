@@ -27,7 +27,7 @@ import numpy as np
 # ----------------------------------------------------------------------------- the repository
 def find_repo(start: str | pathlib.Path = ".") -> pathlib.Path | None:
     """The repository's `src` folder: `twisted_bilayer` importable already, or found in this folder, a parent,
-    or a sibling of a parent (the layout Thesis Tbol/{3D-GPE-..., Twisted bilayer BEC - private/...})."""
+    or a sibling of a parent (the notebook kept in a folder next to the repository's)."""
     try:
         import twisted_bilayer
 

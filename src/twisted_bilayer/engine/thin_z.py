@@ -111,8 +111,10 @@ def thin_z_check(
         er = BilayerGPE(grid.to(torch.float32 if dtype_r == torch.complex64 else torch.float64), dtype=dtype_r, **kw)
         ep = er if dtype_r == dtype_p else BilayerGPE(grid, dtype=dtype_p, **kw)
         psi0 = initial_state(er, n_particles) if psi_start is None else psi_start.to(er.dtype)
-        # one precision: relax straight to tol (the 1e-5 floor is only for a complex64 first stage)
-        r = relax(er, psi0, n_particles, tol=tol if ep is er else max(tol, 1e-5))
+        # one complex128 stage: straight to tol; a complex64 stage (first of two, or the only one) stops at
+        # max(tol, 1e-5), its rounding floor -- a tol below that is out of its reach
+        single128 = ep is er and dtype_r != torch.complex64
+        r = relax(er, psi0, n_particles, tol=tol if single128 else max(tol, 1e-5))
         if ep is not er:
             r = relax(ep, r.psi.to(ep.dtype), n_particles, tol=tol, dt_schedule=[])
         return ep, r

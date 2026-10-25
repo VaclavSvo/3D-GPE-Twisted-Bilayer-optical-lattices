@@ -66,11 +66,14 @@ TRAPPED_DEFAULTS = dict(
 # Defaults of the full-3D comparison (engine.trapped3d): the trapped cloud above, given at box_cells = 3 and
 # scaled to the box at fixed peak density; sizes "auto" fill the device (85 % of the free GPU memory).
 #
-# Precision. 3D solves run in complex64 by default: on the experiment's cloud (box 3, N_z = 48) every
-# observable of `gpu_precision` agrees with complex128 to < 2 % of the 3D - NPSE difference (mu to 1e-7 E_R,
-# contrasts to 4e-6), 16x faster on a GTX 1660 Ti, in half the memory. 2D solves are cheap (0.1 GiB and
-# half a minute for the experiment's cloud) and stay in complex128, as do superfluid fractions (energy
-# differences ~1e-3 E_R on ~80 E_R) and real-time runs. `--128` runs complex128 throughout.
+# Precision. 3D solves run in complex64 by default: on the experiment's cloud (V0 = 4 E_R, box 3, N_z = 48)
+# every observable of `gpu_precision` agrees with complex128 to < 2 % of the 3D - NPSE difference (mu to
+# 1e-7 E_R, contrasts to 4e-6), 16x faster on a consumer GPU, in half the memory. That is the only cloud where
+# it was measured: other clouds have smaller 3D - NPSE differences (down to a few 1e-3 a in R_rms), and
+# there the complex64 floor (residual ~1e-5 E_R) is not known to be negligible -- run a `trapped_3d_precision`
+# row on that cloud, or `--128`. 2D solves are cheap (0.1 GiB and half a minute for the experiment's cloud)
+# and stay in complex128, as do superfluid fractions (energy differences ~1e-3 E_R on ~80 E_R) and real-time
+# runs. `--128` runs complex128 throughout.
 TRAPPED_3D_DEFAULTS = dict(
     {k: v for k, v in TRAPPED_DEFAULTS.items() if k not in ("kind", "box_cells", "vertical", "g2d")},
     cell_points=176,
@@ -106,7 +109,7 @@ SCENARIOS = {
     "rabi_quick": dict(
         kind="rabi",
         V0=V0_ER,
-        Omega_R=0.243,
+        Omega_R=J_PERP_ER[0.243],  # 0.24277 E_R, as every other row (0.243 before 24 Oct)
         filling=1.0,
         m=4,
         n=1,
@@ -166,7 +169,7 @@ SCENARIOS = {
         variants="ABC",
         compare_m=4,
     ),
-    # the bridge (docs/manybody.md): the lattice mean field (variant C, with and without the interband shift)
+    # the bridge (manybody.bridge): the lattice mean field (variant C, with and without the interband shift)
     # against the continuum GPE at fixed g2d on the same cell; mu, E/N, f_s, AA/AB, N2/N, PR over V0 and Omega_R.
     # Always complex128 (energy differences of 1e-3 E_R). The m = 4 row takes about a minute on a CPU
     "bridge_quick": dict(
@@ -208,6 +211,17 @@ SCENARIOS = {
         interband_n_bands=6,
         tb_tol=1e-11,
     ),
+    # phase maps over (V0, Omega_R) with single-site / cluster Gutzwiller (manybody.phase_diagram; the parameters
+    # live in its ROWS, named by "base"). Resumable: a rerun continues results/<name>/maps.npz. The m = 4 rows take
+    # minutes on a CPU and are for speed and plotting only; the m = 22 rows take hours (one process per map)
+    "phase_diagram_quick": dict(kind="phase_diagram", base="phase_diagram_quick"),
+    "phase_diagram_paper_quick": dict(kind="phase_diagram", base="phase_diagram_paper_quick"),
+    "phase_diagram_cluster_quick": dict(kind="phase_diagram", base="phase_diagram_cluster_quick"),
+    "phase_diagram": dict(kind="phase_diagram", base="phase_diagram"),
+    "phase_diagram_noshift": dict(kind="phase_diagram", base="phase_diagram_noshift"),
+    "phase_diagram_paper": dict(kind="phase_diagram", base="phase_diagram_paper"),
+    "phase_diagram_paper_mu095": dict(kind="phase_diagram", base="phase_diagram_paper_mu095"),
+    "phase_diagram_cluster": dict(kind="phase_diagram", base="phase_diagram_cluster"),
     # coupling scan at V0 = 4 E_R on the sqrt(485) supercell, 12 points per a (~6 min on 2 CPU cores)
     "coupling_scan_v4": dict(
         SCAN_DEFAULTS, V0=4.0, filling=1.0, points_per_a=12.0, Omega_R=(0.0, 0.12, 0.24, 0.5, 1.0)

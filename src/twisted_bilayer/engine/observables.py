@@ -246,12 +246,14 @@ def pocket_populations(n: torch.Tensor, grid: Grid, blur_sigma: float = 0.5) -> 
     return out
 
 
-def export_state(engine: BilayerGPE, psi: torch.Tensor, path: str, **meta) -> None:
+def export_state(engine: BilayerGPE, psi: torch.Tensor, path: str, labels: str = "paper", **meta) -> None:
     """Write a field and its diagnostics as npz: psi1, psi2 (complex64), n1, n2, n (float32), mu,
-    E_kin, E_pot, E_int, E_rabi, E_total, norm, residual, grid N/L/dx, twist, `meta`, and a `units`
-    record. Lattice units (a = 1, E_R = 1, hbar = 1); code units (hbar = m = a = 1) have
-    E_code = E * pi^2/2 and t_code = t / (pi^2/2), stored as `E_R_in_code_units`. Fields are in
-    grid order [ix, iy]."""
+    E_kin, E_pot, E_int, E_rabi, E_total, norm, residual, grid N/L/dx, twist, `meta`, a `units`
+    record and `labels` (the component labels, the paper's: component 2 is the imaged |2>). Lattice
+    units (a = 1, E_R = 1, hbar = 1); code units (hbar = m = a = 1) have E_code = E * pi^2/2 and
+    t_code = t / (pi^2/2), stored as `E_R_in_code_units`. Fields are in grid order [ix, iy].
+    A `meta` key that names one of these records (e.g. `n`, the total density) raises ValueError
+    instead of overwriting it."""
     from .backend import to_numpy
     from .units import E_R_CODE
 
@@ -276,10 +278,13 @@ def export_state(engine: BilayerGPE, psi: torch.Tensor, path: str, **meta) -> No
         twist=np.zeros(engine.grid.d) if engine.twist is None else to_numpy(engine.twist[0]),
         E_R_in_code_units=E_R_CODE,
         units="lattice: a=1, E_R=1, hbar=1, m=pi^2/2",
+        labels=labels,
     )
     if psi.shape[1] == 2:
         arrays["psi2"] = to_numpy(psi[0, 1]).astype(np.complex64)
         arrays["n2"] = d[1]
     for k, v in meta.items():
+        if k in arrays or k in ("psi2", "n2"):
+            raise ValueError(f"export_state: metadata {k!r} would overwrite the record of that name")
         arrays[k] = v
     np.savez_compressed(path, **arrays)

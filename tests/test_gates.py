@@ -63,6 +63,11 @@ def test_export_state_round_trip(tmp_path):
         assert float(d["norm"]) == pytest.approx(float(eng.norm(psi)[0]), rel=1e-12)
         assert float(d["mu"]) == pytest.approx(float(eng.energy_terms(psi)["mu"][0]))
         assert float(d["E_R_in_code_units"]) == P.E_R_CODE and float(d["Omega_R"]) == 0.1
+        assert str(d["labels"]) == "paper"
+        assert np.allclose(d["n"], np.abs(a1) ** 2 + np.abs(a2) ** 2, rtol=1e-6)  # the total density
+    # metadata never overwrites a record (the coupling scan used to write the geometry index n over it)
+    with pytest.raises(ValueError, match="overwrite"):
+        EA.obs.export_state(eng, psi, str(path), n=1)
 
 
 # ------------------------------------------------------ (iii) engine smoke subset
@@ -98,3 +103,92 @@ def test_run_all_quick_full_suite(tmp_path):
     assert demo and not demo["passed"]
     assert abs(suite.meta["values"]["D"]["kappa_nbar5"] - 1.31) < 0.05
     assert len(suite.results) >= 60
+
+
+# ------------------------------------------------- (v) the gate primitives cannot pass on nothing or on NaN
+def test_drift_gates_fail_on_a_non_finite_frame():
+    """A run that turns NaN or inf after frame 0 fails every drift gate (Python's max keeps its first operand on
+    a NaN comparison, so the drift used to be that of the finite frames only)."""
+    from twisted_bilayer.gates import core as H
+
+    nan, inf = float("nan"), float("inf")
+    for bad in (nan, inf, -inf):
+        assert not H.rel_drift_gate("n", [1.0, 1.0, bad], 1e-6).passed
+        assert not H.abs_drift_gate("n", [0.0, 0.0, bad], 1.0, 1e-6).passed
+    assert "frame 2" in H.rel_drift_gate("n", [1.0, 1.0, nan], 1e-6).detail
+    hist = dict(t=[0, 1, 2], norm=[1, 1, nan], E_total=[2, 2, nan], N2_over_N=[0, 0, nan], highk=[1e-7, 1e-7, nan])
+    gates = {g.name: g.passed for g in H.conservation_gates(hist, J_perp=0.0)}
+    assert gates == {"norm": False, "energy": False, "N2_over_N (J_perp = 0)": False, "high-k weight": False}
+    mu = H.imaginary_time_gates(dict(mu=[1.0] * 10 + [nan] + [1.0] * 9))[0]
+    assert mu.name == "mu plateau" and not mu.passed
+    # finite histories are judged as before
+    assert all(g.passed for g in H.conservation_gates(dict(t=[0, 1], norm=[1, 1], E_total=[2, 2], highk=[1, 1])))
+
+
+def test_unknown_only_id_is_an_error_and_no_gates_is_not_a_pass(capsys):
+    from twisted_bilayer.gates import core as H
+
+    with pytest.raises(ValueError, match="Z9.*valid ids: A1"):
+        EA.run_all(only={"A1", "Z9"}, verbose=False)
+    with pytest.raises(ValueError, match="no scenario id"):
+        EA.run_all(only=set(), verbose=False)
+    with pytest.raises(SystemExit) as e:  # the command line: a usage error, exit code 2
+        EA.main(["--only", "Z9", "--quiet"])
+    assert e.value.code == 2 and "unknown scenario id(s) Z9" in capsys.readouterr().err
+    empty = H.GateSuite("engine", "nothing")
+    assert not empty.passed and "NO GATES RUN" in empty.report() and '"passed": false' in empty.to_json()
+
+
+def test_E_z0_anchor_is_parameters_omega_z_over_2():
+    v, tol, _ = R.anchor("E_z0_code")
+    assert abs(v - P.OMEGA_Z / 2) / v < tol  # 0.6707839384 was 1.07e-9 off at tol 1e-9
+
+
+def test_suite_module_device_defaults_to_the_imported_device(monkeypatch):
+    """`python -m twisted_bilayer.gates.suite` without --device runs on the device the engine was imported on
+    (it used to default to cpu and raise on a GPU machine); `twisted-bilayer gates` forces the CPU first."""
+    seen = {}
+
+    def fake_run_all(out, **kw):
+        seen.update(kw)
+        s = EA.GateSuite("engine", "fake")
+        s.add(EA.GateResult("x", True, "ok"))
+        s.meta["device"] = "fake"
+        return s
+
+    monkeypatch.setattr(EA, "run_all", fake_run_all)
+    assert EA.main(["--quiet"]) == 0
+    assert seen["device"] == ("cuda" if EA.backend.HAS_GPU else "cpu")
+    assert EA.main(["--quiet", "--device", "cpu"]) == 0 and seen["device"] == "cpu"
+
+
+# ------------------------------------------- (vi) checks that were gates which could not fail (17 Oct audit)
+def test_one_component_runs_have_no_N2_gate():
+    """A2 and A3 are one-component runs whose N2/N is written as 0.0 every frame, so a gate on it could not
+    fail; B8 (two components at J = 0) keeps its N2/N gate."""
+    suite = EA.run_all(quick=True, only={"A2", "A3", "B8"}, verbose=False, threads=2)
+    assert suite.passed
+    n2 = [r.name.split(" ")[0] for r in suite.results if "N2_over_N" in r.name]
+    assert n2 == ["B8"]
+
+
+def test_choose_dt_values_obey_its_caps():
+    """What gate D used to gate, as a test of choose_dt: the kinetic phase per step of order 2 and of order 4
+    with the multiplier 20 (outer step and largest Yoshida sub-step) below 2.6 rad, the same phase in E_R and
+    code units, and a grid that resolves twice the lattice wavenumber."""
+    c = EA.twisted_cell_case(ppa=8)
+    eng, r = EA.Context(True, False).ground(176, EA.er(c["J"]), 1.0, "fixed")  # the production cell, 8 pts/a
+    v = EA.choose_dt_values(eng, r.psi)
+    for o in (2, 4):
+        assert v[f"order{o}_phase"] < 2.6, v
+        assert abs(v[f"order{o}_phase"] / v[f"order{o}_phase_code"] - 1) < 1e-12, v
+    assert v["order4_substep_phase"] < 2.6 and v["order4_dt_ER"] > v["order2_dt_ER"]
+    assert v["k_nyquist"] > 2.0 * v["k_lattice"]
+
+
+def test_band_bottom_literals_agree():
+    """C11 compared E0 with the anchor, with parameters.E0_BAND_BOTTOM (the same literal) and with the E_R
+    anchor (the same number at 30x the tolerance); the literals are checked here once."""
+    for name, J in (("dressed_band_bottom_J0.2428_code", 1.19802), ("dressed_band_bottom_J0.1214_code", 0.599)):
+        assert P.E0_BAND_BOTTOM[J] == R.anchor(name)[0]
+    assert R.anchor("dressed_band_bottom_J0.2428_ER")[1] > R.anchor("dressed_band_bottom_J0.2428_code")[1]

@@ -14,9 +14,11 @@ fluctuation obeys
 delta_1 = +Delta/2, delta_2 = -Delta/2. For contact interactions g' = g and
 mu_int(n) = g n; for a density functional (engine.npse.NPSE2D) the
 diagonal keeps mu_int(n) and only the exchange kernel becomes mu_int'(n).
-For a real psi0 the full BdG operator is real in real space, so it commutes
-with the box translations and u and v carry the SAME Bloch factor:
-u = e^{i q.r} u~, v = e^{i q.r} v~ with u~, v~ periodic. This module works
+psi0 is periodic on the box, so the BdG operator commutes with the box
+translations acting on the pair (u, v); its eigenvectors are Bloch states and
+u and v carry the SAME Bloch factor: u = e^{i q.r} u~, v = e^{i q.r} v~ with
+u~, v~ periodic. (The realness of psi0, the gauge fixed below, gives M* = M,
+which the reduction uses; the common Bloch factor does not need it.) This module works
 with the periodic parts; the kinetic energy is kappa |k + q|^2 on both, which
 is the engine's twist trick (twist theta = q L).
 
@@ -43,6 +45,12 @@ constraints: f orthogonal to psi0, h oblique-orthogonal to P0 = A^{-1} psi0
 (one preconditioned CG solve). On the constrained spaces A and B are both
 positive definite. With C = 2 and Omega_R = 0 the relative phase
 (psi1, -psi2) is a second Goldstone mode and is projected the same way.
+If in addition both components see the same D (V1 = V2, Delta = 0: the
+SU(2)-symmetric gas, since the exchange kernel couples the total density only),
+the spin rotation chi = (-psi2, psi1) is in the kernel of A as well as of B,
+so A^{-1} does not exist on it: then Z = (psi0, chi) spans ker B, the
+h-constraints are chi itself and A^+ psi0 (solved in the complement of chi),
+and the dense solver lifts chi in A before its Cholesky factorisation.
 
 Eigensolver. The lowest few w of a spectrum spanning [~1e-2, kappa k_max^2 ~ 1e2]
 E_R, matrix-free. The equivalent definite pencil (A B A, A) has a condition
@@ -239,7 +247,10 @@ def _lr_lobpcg(apply_A, apply_B, prec_A, prec_B, X0, n_want, proj_f, proj_h, tol
 
 def _cg(apply_op, b, prec, tol=1e-12, maxiter=5000):
     """Preconditioned conjugate gradients for a Hermitian positive definite
-    operator on a block of right-hand sides (columns solved independently)."""
+    operator on a block of right-hand sides (columns solved independently).
+    A column that has converged exactly (r = 0, so p^H A p = 0 and r^H z = 0)
+    while another one is still iterating keeps its x: its step and its
+    direction update are set to zero instead of 0/0."""
     shp = lambda t: t.reshape((-1,) + (1,) * (b.ndim - 1)).to(b.dtype)
     x = torch.zeros_like(b)
     r = b.clone()
@@ -247,16 +258,18 @@ def _cg(apply_op, b, prec, tol=1e-12, maxiter=5000):
     p = z.clone()
     rz = _gram(r, z).diagonal().real
     nb = _norms(b).clamp_min(1e-300)
+    zero = torch.zeros_like(rz)
     for it in range(maxiter):
         Ap = apply_op(p)
-        alpha = rz / _gram(p, Ap).diagonal().real
+        pAp = _gram(p, Ap).diagonal().real
+        alpha = torch.where(pAp != 0, rz / pAp, zero)
         x = x + shp(alpha) * p
         r = r - shp(alpha) * Ap
         if float((_norms(r) / nb).max()) < tol:
             return x, it + 1
         z = prec(r)
         rz_new = _gram(r, z).diagonal().real
-        p = z + shp(rz_new / rz) * p
+        p = z + shp(torch.where(rz != 0, rz_new / rz, zero)) * p
         rz = rz_new
     warnings.warn(f"CG did not reach tol {tol:g} in {maxiter} iterations", stacklevel=2)
     return x, maxiter
@@ -316,8 +329,14 @@ class BdG:
                 "BdG about a current-carrying (twisted) state needs the full "
                 "non-Hermitian problem; relax psi0 with twist 0"
             )
-        if engine.batch_hint != 1 or psi0.shape[0] != 1:
-            raise ValueError("BdG works on one state: batch size 1 and scalar parameters")
+        # engine.batch_hint looks at g, Omega_R, delta and the twist only; a batched potential (B, C, *N) would
+        # broadcast the blocks wrongly, so it is checked here as well
+        v_batch = 1 if engine.V is None else int(engine.V.shape[0])
+        if engine.batch_hint != 1 or psi0.shape[0] != 1 or v_batch != 1:
+            raise ValueError(
+                "BdG works on one state: batch size 1, scalar parameters and one potential "
+                f"(batch_hint {engine.batch_hint}, psi0 batch {psi0.shape[0]}, V batch {v_batch})"
+            )
         self.device = g.device
         self.rdtype = torch.float64
         self.cdtype = torch.complex128
@@ -463,9 +482,14 @@ class BdG:
     # -- zero modes ------------------------------------------------------------------------
     def zero_modes(self):
         """At q = 0: (Z, P) with Z (z, C, *N) the Goldstone h-vectors (psi0, and
-        (psi1, -psi2) when C = 2 and Omega_R = 0) and P = A^{-1} Z. None at q != 0.
+        (psi1, -psi2) when C = 2 and Omega_R = 0) and P the h-constraint vectors,
+        P^H h = 0 for every mode with w != 0: P = A^{-1} Z. None at q != 0.
         The set is reduced to its independent directions (`_independent`): with one
-        component empty, (psi1, -psi2) = -psi0 and there is one Goldstone mode, not two."""
+        component empty, (psi1, -psi2) = -psi0 and there is one Goldstone mode, not two.
+        When the spin rotation chi (`spin_kernel`) is in ker A: Z = independent
+        (psi0, chi, (psi1, -psi2)) (the last one is in the span of the first two for
+        a ground state) and P = (A^+ Z_i for Z_i != chi, chi), A^+ by CG on the
+        complement of chi (operator and preconditioner projected)."""
         if not self.at_gamma:
             return None
         if self._zero is None:
@@ -477,10 +501,39 @@ class BdG:
                         (1, 2) + (1,) * self.grid.d
                     )
                 )
-            Z = _independent(torch.cat(Z)).to(self.block_dtype)
-            P, _ = _cg(self.apply_A, Z, self.preconditioner(self.default_shift()))
+            chi = self.spin_kernel()
+            if chi is None:
+                Z = _independent(torch.cat(Z)).to(self.block_dtype)
+                P, _ = _cg(self.apply_A, Z, self.preconditioner(self.default_shift()))
+            else:
+                Z = _independent(torch.cat([Z[0], chi, Z[1]])).to(self.block_dtype)
+                chi = chi.to(self.block_dtype)
+                cn2 = float(_norms(chi)[0]) ** 2
+
+                def perp(Y):  # remove the chi component
+                    return Y - _comb(chi, _gram(chi, Y) / cn2)
+
+                prec = self.preconditioner(self.default_shift())
+                rest = [0] + list(range(2, Z.shape[0]))  # Z[1] is chi (kept: it is orthogonal to psi0)
+                Pr, _ = _cg(lambda Y: perp(self.apply_A(perp(Y))), perp(Z[rest]), lambda Y: perp(prec(perp(Y))))
+                Pr = perp(Pr)
+                P = torch.cat([Pr[:1], chi, Pr[1:]])
             self._zero = (Z, P)
         return self._zero
+
+    def spin_kernel(self):
+        """chi = (-psi2, psi1), the generator of the spin rotation, if it is in the kernel
+        of A (C = 2, Omega_R = 0, q = 0), else None. A chi = (-D_1 psi2, D_2 psi1) (X chi = 0
+        identically): zero when both components see the same D (V1 = V2, Delta = 0) and psi0
+        is stationary, and then |A chi| / |chi| is the GP residual of psi0. Detected as
+        |A chi| / |chi| <= max(10 gp_residual, 1e-12 s) and <= 1e-6 s, s = `default_shift`
+        (an asymmetry between the components gives |A chi| / |chi| ~ |V1 - V2|, Delta)."""
+        if not (self.at_gamma and self.C == 2 and self.Omega_R == 0.0):
+            return None
+        chi = torch.cat([-self.psi0[:, 1:2], self.psi0[:, 0:1]], dim=1)
+        rel = float(_norms(self.apply_A(chi))[0]) / float(_norms(chi)[0])
+        s = self.default_shift()
+        return chi if rel <= max(10.0 * self.gp_residual, 1e-12 * s) and rel <= 1e-6 * s else None
 
     def _projectors(self):
         zm = self.zero_modes()
@@ -577,6 +630,13 @@ class BdG:
         Bm = self._dense_matrix(self.apply_B, nvec, dt)
         Am = 0.5 * (Am + Am.conj().T)
         Bm = 0.5 * (Bm + Bm.conj().T)
+        chi = self.spin_kernel() if self.at_gamma else None
+        if chi is not None:
+            # chi in ker A and ker B: lift it in A (A + s chi chi^H / |chi|^2). Every mode with w != 0 has
+            # f orthogonal to chi, so A f is unchanged; chi itself becomes a w = 0 mode, dropped below
+            # with the Goldstone pair (Z holds both)
+            cv = chi.reshape(-1, 1).to(dt) / float(_norms(chi)[0])
+            Am = Am + self.default_shift() * (cv @ cv.conj().T)
         R = torch.linalg.cholesky(Am).conj().T  # A = R^H R
         S = R @ Bm @ R.conj().T
         lam, Y = torch.linalg.eigh(0.5 * (S + S.conj().T))
@@ -651,12 +711,16 @@ class BdG:
           (the ratio used for the 1D toy model's BdG spectrum), s = sign(int psi1 psi2)
           the condensate's relative sign (-1 for this engine's +Omega_R sigma_x
           lower dressed state; +1 in the toy's -Omega/2 sigma_x convention).
-          In [0, 1]: 0 for a density mode, 1 for a pure spin-flip mode, 1/2 for
-          a mode in one layer only; spin-like above 0.5. 0 for C = 1;
+          In [0, 1]; with equal layer densities 0 for a density mode, 1 for a
+          pure spin-flip mode, 1/2 for a mode in one layer only; spin-like above
+          0.5. With unequal layer densities it mixes the two (a density mode has
+          u1 != s u2 and a spin weight above 0, a spin mode one below 1). 0 for
+          C = 1;
         * local spin weight: the fraction carried by the component orthogonal
           to the LOCAL condensate spinor, chi_perp = (-psi0_2, psi0_1)/|psi0|
-          (the locally density-neutral part); equals the spin weight where the
-          layers' densities coincide, lower where they do not;
+          (the locally density-neutral part): 0 for a density mode and 1 for a
+          spin mode whatever the layer densities; equal to the spin weight where
+          the densities coincide;
         * depletion int sum |v|^2 dV.
         Returns (pr, spin, depletion, local_spin)."""
         g = self.grid

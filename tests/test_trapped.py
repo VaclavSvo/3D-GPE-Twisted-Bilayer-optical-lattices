@@ -78,35 +78,37 @@ def test_lda_in_the_plane_closed_form():
 def test_containment_policies():
     """resolve_box on a cloud wider than its box (the quick cell at a weak trap): refuse (default)
     raises and names the box that holds it; enlarge runs it on that box at the same N and nu_r; warn
-    returns it unchanged with a warning. The quick cloud itself fits."""
-    spec = TR.TrappedSpec(**QUICK)
+    returns it unchanged with a warning. The quick cloud itself fits. On the quick cell at 16 points (4 per a):
+    the test is about the box logic, and the enlarged solves (two boxes) stay at ~15 s."""
+    Q = {**QUICK, "cell_points": 16}
+    spec = TR.TrappedSpec(**Q)
     scan = TR.supercell_scan(spec)
     ok = TR.containment(spec, scan)
     assert ok["fits"] and ok["ratio"] < TR.CONTAIN_REFUSE and ok["box_needed"] <= spec.box_cells
-    wide = TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0})
+    wide = TR.TrappedSpec(**{**Q, "nu_r_hz": 40.0})
     info = TR.containment(wide, scan)
     assert not info["fits"] and info["box_needed"] > wide.box_cells and info["box_needed"] % 2 == 1
     assert info["R_TF"] <= TR.CONTAIN_TARGET * TR.box_half_width(
-        TR.TrappedSpec(**{**QUICK, "box_cells": info["box_needed"]})
+        TR.TrappedSpec(**{**Q, "box_cells": info["box_needed"]})
     )
     with pytest.raises(TR.UncontainedCloud, match=f"box_cells >= {info['box_needed']}"):
         TR.trapped_ground_state(wide, scan=scan)
-    big, cont = TR.resolve_box(TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0, "containment": "enlarge"}), scan)
+    big, cont = TR.resolve_box(TR.TrappedSpec(**{**Q, "nu_r_hz": 40.0, "containment": "enlarge"}), scan)
     assert big.box_cells == info["box_needed"] and big.N_atoms == wide.N_atoms and big.nu_r_hz == wide.nu_r_hz
     assert cont["fits"] and cont["action"].startswith("enlarged")
     # the quick cloud is small (R_TF ~ 2 oscillator lengths): the Thomas-Fermi box is not enough, and "enlarge"
     # grows the box again on the solved cloud's edge density until it is contained
-    run = TR.trapped_ground_state(TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0, "containment": "enlarge"}), scan=scan)
+    run = TR.trapped_ground_state(TR.TrappedSpec(**{**Q, "nu_r_hz": 40.0, "containment": "enlarge"}), scan=scan)
     b = run["spec"].box_cells
-    assert b >= big.box_cells and run["grid"].N[0] == b * QUICK["cell_points"]
+    assert b >= big.box_cells and run["grid"].N[0] == b * Q["cell_points"]
     s = TR.summary(run, wide)  # the summary describes the box that ran, not the requested one
     assert s["spec"]["box_cells"] == b and s["checks"]["contained"]
     assert b == big.box_cells or "edge check" in s["containment"]["action"]
     with pytest.warns(RuntimeWarning, match="too wide for its"):
-        same, _ = TR.resolve_box(TR.TrappedSpec(**{**QUICK, "nu_r_hz": 40.0, "containment": "warn"}), scan)
+        same, _ = TR.resolve_box(TR.TrappedSpec(**{**Q, "nu_r_hz": 40.0, "containment": "warn"}), scan)
     assert same.box_cells == wide.box_cells
     with pytest.raises(ValueError):
-        TR.resolve_box(TR.TrappedSpec(**{**QUICK, "containment": "maybe"}), scan)
+        TR.resolve_box(TR.TrappedSpec(**{**Q, "containment": "maybe"}), scan)
 
 
 def test_checks():

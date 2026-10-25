@@ -7,7 +7,7 @@
 two square optical lattices twisted against each other, one lattice per hyperfine state, coupled by a
 microwave field. It is written in PyTorch and runs on CPU and CUDA. It covers the exactly periodic moiré
 supercell, trapped clouds, real-time dynamics, and time of flight with absorption imaging. The engine is
-checked by 89 physics gates, all passing.
+checked by 77 physics gates, all passing.
 
 The model follows the experiment of Meng *et al.*,
 [*Atomic Bose–Einstein condensate in twisted-bilayer optical lattices*, Nature **615**, 231 (2023)](https://doi.org/10.1038/s41586-023-05695-4):
@@ -54,14 +54,14 @@ supercell (θ = 5.2051°, side √485 a, 2 × 2 moiré cells) and the ground-sta
   checked against the full 3D solution. The package also covers trapped clouds from a local-density start,
   Bogoliubov–de Gennes modes, a two-layer Bose–Hubbard mean field, and the time-of-flight and coherent
   absorption-imaging pipeline.
-- **Physics gates.** 89 gates check the engine against analytic results, exact identities, and numbers
+- **Physics gates.** 77 gates check the engine against analytic results, exact identities, and numbers
   reproduced by the author's earlier, separately written quasi-2D and 3D solvers. Those solvers are not
   distributed; their values and tolerances are pinned in
   [`gates/references.py`](src/twisted_bilayer/gates/references.py).
 
 ## Validation
 
-A selection from `twisted-bilayer gates --full --trapped`: 89 gates, all passing, on the CPU in complex128,
+A selection from `twisted-bilayer gates --full --trapped`: 77 gates, all passing, on the CPU in complex128,
 in about 6.5 minutes on 2 CPU cores. The command prints the full table and writes it as JSON.
 
 | check | error | reference |
@@ -145,7 +145,7 @@ keeps what it finished. `python check.py` keeps its runs in the same way in `res
 | panel | steps | where, how long |
 | --- | --- | --- |
 | `quick` | lint and format; the test suite; the quick physics gates; on a small trapped cloud: 3D against both quasi-2D models against pinned numbers, vertical resolution, in-plane resolution | CPU or GPU, about 6 minutes on 2 cores |
-| `broad` | `quick`, plus: the slow tests; the full physics gates with the trapped cloud (on the GPU); GPU against CPU; on the experiment's cloud: 3D against quasi-2D in complex64 and complex128 against pinned numbers, vertical and in-plane resolution; the 3D size planner | needs a GPU; about 30-60 minutes on a 12 GB card |
+| `broad` | `quick`, plus: the slow tests; the full physics gates with the trapped cloud (on the GPU); GPU against CPU; on the experiment's cloud: 3D against quasi-2D in complex64 and complex128 against pinned numbers, vertical and in-plane resolution; the 3D size planner | needs a GPU; about 30-60 minutes with 12 GB of GPU memory |
 
 `--list` shows the steps, `--only` and `--skip` select them. The pinned numbers and their tolerances are in
 `gates/panel_references.py`; a step's pass criterion is in its docstring (`twisted_bilayer/panel.py`).
@@ -206,7 +206,7 @@ Times are for 2 CPU cores. Figures go to `examples/output/`.
 
 | script | what it shows | time |
 | --- | --- | --- |
-| [`01_ground_state.py`](examples/01_ground_state.py) | ground state on the experiment's supercell and the figure above | 15 s |
+| [`01_ground_state.py`](examples/01_ground_state.py) | ground state on the experiment's supercell, with a figure of its density | 15 s |
 | [`02_superfluid_fraction.py`](examples/02_superfluid_fraction.py) | superfluid fraction against the coupling, by twist energy and current, with Leggett's bounds; one batched solve | 10 s |
 | [`03_time_step_convergence.py`](examples/03_time_step_convergence.py) | order-2 and order-4 convergence of the real-time integrator, norm and energy conservation | 15 s |
 | [`my_scenarios.py`](examples/my_scenarios.py) | your own scenario rows for the command line: `twisted-bilayer run scan_v6_quick --scenarios examples/my_scenarios.py` | 15 s |
@@ -229,14 +229,26 @@ your own file with `--scenarios FILE`. Times are for 2 CPU cores.
 | `bdg` | Bogoliubov–de Gennes modes: sound speed and the spin branch (always on the CPU) | 1.5 min |
 | `tight_binding` | the two-layer Bose–Hubbard mean field on the experiment's supercell, three variants (always on the CPU) | 1.5 min |
 | `bridge_quick` | the lattice mean field against the continuum GPE on the tan(θ/2) = 1/4 cell, with and without the interband shift | 1 min |
+| `phase_diagram_quick` | single-site Gutzwiller phase map (SF / SF-II / I / MI) over V₀ and Ω_R on the tan(θ/2) = 1/4 cell; for speed and plotting | minutes |
+| `phase_diagram_paper_quick` | the same for the paper's one-layer model | minutes |
+| `phase_diagram_cluster_quick` | the same with interlayer-dimer clusters (cluster Gutzwiller) | ~10 min |
 | `coupling_scan_v4` | coupling scan at V₀ = 4 E_R on the experiment's supercell (θ = 5.2°) | 6 min |
 | `trapped` | a cloud of N = 2000 atoms in a 20 Hz trap on 3 × 3 supercells, and its contrast as imaged | 6 min |
 | `bridge` | the same comparison on the experiment's supercell (12 continuum ground states at 16 points per a) | hours on a CPU, minutes on a GPU |
+| `phase_diagram`, `phase_diagram_noshift` | single-site Gutzwiller phase map on the experiment's supercell, 21 × 13 points, with and without the interband shift | ~2 h on one core per map |
+| `phase_diagram_paper`, `phase_diagram_paper_mu095` | the paper's model on the experiment's supercell, at μ/U = 1 and 0.95 (the reading that reproduces the paper's Fig. S4c) | ~1 h |
+| `phase_diagram_cluster` | interlayer-dimer cluster map on the experiment's supercell, 11 × 7 points | ~2 h |
 | `gpu_check` | the quick scan on the GPU and on the CPU, every number compared; then a production timing | GPU |
 | `gpu_3d_vs_2d` | the trapped cloud in full 3D and in both quasi-2D models, as large as the GPU holds | GPU |
 | `gpu_precision` | the same comparison in complex128 and complex64, sized to take about 10 minutes | GPU, 10 min |
 | `gpu_3d_nz` | the experiment's cloud in 3D at N_z = 16 … 96 over the same z box, against the finest | GPU, ~10 min |
 | `gpu_xy_convergence` | in-plane resolution: supercell (V₀ = 4, 8, 16) at 4 … 24 points per a, trapped cloud at 4 … 16 | GPU, tens of min |
+
+The phase maps also run on their own, with more options (time budget, resume, U correction table):
+`python -m twisted_bilayer.manybody.phase_diagram <row> --out <folder> [--device cuda] [--threads 1]
+[--max-hours H] [--redo-unconverged] [--force-resume]`, where `<row>` is any entry of
+`manybody.phase_diagram.ROWS`. A map is written after every V₀ column and a rerun into the same folder continues
+it; a folder made with another row specification is refused.
 
 ## How it works, in one paragraph
 
@@ -260,7 +272,10 @@ src/twisted_bilayer/
                  bands.py, lattice_model.py, units.py, backend.py
   manybody/      the lattice model beyond mean field: parameters.py (Bose-Hubbard parameters, the parameter
                  and sign audits, the occupation-dependent U), paper_model.py (the paper's one-layer model),
-                 bridge.py (the lattice mean field against the continuum GPE)
+                 bridge.py (the lattice mean field against the continuum GPE), gutzwiller.py (single-site
+                 Gutzwiller with twisted boundaries, batches and several starts), cluster.py (cluster
+                 Gutzwiller), observables.py (momentum distribution, visibilities, phase labels),
+                 phase_diagram.py (phase maps over V0 and Omega_R)
   tof/           time of flight and absorption imaging
   gates/         physics gates: core.py, references.py (every reference number), suite.py
   config.py      the experiment's physical inputs
@@ -282,8 +297,8 @@ visible. To stay on the CPU, pass `--cpu` to `twisted-bilayer run`, or set the e
 on the CPU unless you pass `--device cuda`, and `bdg` and `tight_binding` always run on the CPU.
 
 Start with `twisted-bilayer run gpu_check`. It runs the quick scan on both devices and compares every
-number (10⁻⁶ on energies, 10⁻⁴ on superfluid fractions) before it times a production-size cell. On a
-12 GB consumer NVIDIA GPU, `coupling_scan_quick` reproduces the CPU table above to every printed digit.
+number (10⁻⁶ on energies, 10⁻⁴ on superfluid fractions) before it times a production-size cell. On an
+NVIDIA GPU with 12 GB, `coupling_scan_quick` reproduces the CPU table above to every printed digit.
 Supercell ground states run in complex128. Large grids can relax in complex64 and polish in complex128.
 Each scenario row names its precision; `twisted-bilayer run NAME --128` overrides it with complex128
 throughout (see below for what single precision costs).
@@ -321,8 +336,8 @@ the edge) is refused with the box size that holds it (`containment="enlarge"` in
 the same N and ν_r, `"warn"` runs anyway; 3D rows pin their box). A larger 3D box at fixed peak density
 (`gpu_3d_vs_2d`) scales the cloud with the box, so it never contains a cloud that 3 × 3 does not. After the solve each summary records `checks`:
 `contained` (edge density below 10⁻³ of the peak), `converged`, and WARNING lines in the report when either
-fails. Deep lattices and strong coupling widen the experiment's cloud a lot (R_TF ≈ 62 a at V₀ = 12 E_R,
-Ω_R = 1 E_R, against a 3 × 3 half-width of 33 a).
+fails. Deep lattices and strong coupling widen the experiment's cloud a lot (R_TF ≈ 58 a in the infinite plane
+at V₀ = 12 E_R, Ω_R = 1 E_R, against a 3 × 3 half-width of 33 a: it takes a 7 × 7 box).
 
 `gpu_xy_convergence` does the same in the plane: the homogeneous supercell at V₀ = 4, 8, 16 E_R from 4 to 24
 points per a, and the trapped cloud from 4 to 16 points per a (88 to 352 per supercell), each against the
@@ -334,7 +349,7 @@ resolution scan should include a grid that does not share points with the others
 **Settings for a converged 3D cloud** (checked one source at a time, in complex128, on the experiment's
 cloud; each source changes every observable by ≤ 10⁻⁵ relative):
 
-| setting | value | cost on a 12 GB card |
+| setting | value | cost with 12 GB of GPU memory |
 | --- | --- | --- |
 | in-plane points | 176 per supercell (8 per a) at 4 E_R; 12 per a at 8–12 E_R, 16 per a beyond | |
 | vertical | N_z = 24 over ±5 l_z (16 if memory forces it) | |
@@ -355,8 +370,8 @@ twisted-bilayer run gpu_3d_vs_2d     # the largest cloud this GPU holds
 
 ## Limitations
 
-- Mean field only. Quantum depletion and finite temperature are not included, beyond the Bogoliubov modes
-  and the single-site Gutzwiller of the lattice model.
+- Mean field only in the continuum. Quantum depletion is included only through the Bogoliubov modes and,
+  on the lattice, single-site and cluster Gutzwiller; finite temperature is not included.
 - One s-wave scattering length for all three channels (SU(2)-symmetric interaction), as in the paper.
 - Commensurate twist angles only (tan(θ/2) = n/m). The measured angle 5.21(5)° is represented by 1/22.
 - The shipped 3D scenario (`thin_z_quick`) uses the small tan(θ/2) = 1/4 cell. Full 3D runs on the

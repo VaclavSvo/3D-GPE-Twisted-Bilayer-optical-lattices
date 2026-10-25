@@ -121,7 +121,11 @@ ANCHORS = {
         "same with fixed g2D (this engine and the quasi-2D split-step solver to 6 digits)",
     ),
     "mu3d_minus_Ez0_J0.243_n3_code": (14.5636065, 1e-7, "3D pancake, 176^2 x 32, independent solver to 2e-7"),
-    "E_z0_code": (0.6707839384, 1e-9, "hbar omega_z / 2 = 0.67078"),
+    "E_z0_code": (
+        0.6707839391,
+        1e-9,
+        "hbar omega_z / 2 = parameters.OMEGA_Z / 2 (0.6707839384 before 24 Oct: 1.07e-9 off)",
+    ),
     "fs_twist_J0.243_n1_fixedg": (
         0.6128,
         3e-4,

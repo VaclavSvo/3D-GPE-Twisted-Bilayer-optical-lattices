@@ -354,8 +354,11 @@ class Orders:
         return np.array([e.norm(component) for e in self.envs])
 
     def weights(self, component=None):
+        """Norm fractions of the orders (empty for no orders); a zero total norm is a ValueError."""
         n = self.norms(component)
-        return n / n.sum()
+        if len(n) and not n.sum() > 0:
+            raise ValueError(f"Orders.weights: the total norm of the {len(n)} orders is {n.sum()}; no weights")
+        return n / n.sum() if len(n) else n
 
 
 @dataclass
@@ -406,6 +409,14 @@ def fourier_resample(psi, dx, factor_or_n):
     out[:, iy_t[:, None], ix_t[None, :]] = pk[:, iy_s[:, None], ix_s[None, :]]
     tot = np.sum(np.abs(pk) ** 2)
     kept = np.sum(np.abs(out) ** 2)
+    # zero padding of an even grid: the source Nyquist coefficient (-N/2) stands for cos(pi x/dx), the sum of
+    # the +N/2 and -N/2 modes of the finer grid; split it between them so a real field stays real
+    if Nxn > Nx and Nx % 2 == 0:
+        out[:, :, Nx // 2] = 0.5 * out[:, :, Nxn - Nx // 2]
+        out[:, :, Nxn - Nx // 2] *= 0.5
+    if Nyn > Ny and Ny % 2 == 0:
+        out[:, Ny // 2, :] = 0.5 * out[:, Nyn - Ny // 2, :]
+        out[:, Nyn - Ny // 2, :] *= 0.5
     out *= (Nxn * Nyn) / (Nx * Ny)
     res = sfft.ifft2(out, axes=(-2, -1), workers=_WORKERS)
     if was2d:
@@ -439,6 +450,8 @@ def _support(phi_np, dx, dy, eps_real, eps_q):
     (|phi~|^2 > eps_q max). Returns (ix_lo, ix_hi, iy_lo, iy_hi, kx_sup, ky_sup)."""
     d = (phi_np.real**2 + phi_np.imag**2).sum(0)
     m = d.max()
+    if not (np.isfinite(m) and m > 0):
+        raise ValueError(f"_support: the field is zero or not finite everywhere (max |phi|^2 = {m}); no support")
     cols = np.nonzero(d.max(axis=0) > eps_real * m)[0]
     rows = np.nonzero(d.max(axis=1) > eps_real * m)[0]
     S = np.abs(sfft.fft2(phi_np, axes=(-2, -1), workers=_WORKERS)) ** 2
@@ -580,11 +593,31 @@ def _sep_phase(B, like, ax, ay):
     return ex[None, None, :], ey[None, :, None]
 
 
+NLS_HIGHK_FRAC = 0.75  # the tail's high-k weight: the norm at |k| > 0.75 k_Nyquist (as in meanfield_stage)
+NLS_HIGHK_GROWTH = 10.0  # the tail fails when that weight grows by more than this (the conservation gate's 10)
+
+
+def _highk_weight(B, pk, kx, ky, frac=NLS_HIGHK_FRAC) -> float:
+    k2 = kx[None, :] ** 2 + ky[:, None] ** 2
+    kny2 = min(np.abs(kx).max(), np.abs(ky).max()) ** 2
+    mask = B.as_real((k2 > frac**2 * kny2).astype(float), pk)
+    a2 = B.abs2(pk)
+    tot = float(B.sum(a2))
+    return float(B.sum(a2 * mask[None])) / tot if tot > 0 else 0.0
+
+
 def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5, s0=1.0):
     """i d_t phi = [-1/2 lap + g(t) sum_c |phi_c|^2] phi on a periodic box,
     Strang splitting with merged kinetic half-steps; the time integral of g
     over each potential sub-step is exact (g of `g_of_t` with release width s0). Step size:
-    int g/g2D dt <= dphi (at s0 = 1), dt <= dt_max. Returns (phi, n_steps)."""
+    int g/g2D dt <= dphi (at s0 = 1), dt <= dt_max.
+
+    The step is not limited by the kinetic phase per step (k_max^2 dt / 2 reaches ~80 rad on the dx = 0.5
+    coarse grid, where meanfield_stage keeps it below pi): the split step's resonant instability needs a
+    nonlinear phase per step that the tail's dilute orders do not have (~1e-2 rad; the result agrees with a
+    30x finer schedule to 4e-5 of the image peak). Its symptom, growth of the weight at |k| > 0.75 k_Nyq, is
+    measured instead (`propagate_orders` fails on growth above NLS_HIGHK_GROWTH).
+    Returns (phi, n_steps, diag) with diag = dict(kin_phase_max, highk=(start, end))."""
     B = _bk(phi)
     nc, Ny, Nx = phi.shape
     kx, ky = _kvec(Nx, dx), _kvec(Ny, dy)
@@ -599,6 +632,7 @@ def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5, s0
     hs = np.diff(ts)
     Phi = np.diff(g_integral(ts, g2D, omega_z, s0))
     pk = B.fft2(phi)
+    hk0 = _highk_weight(B, pk, kx, ky)
     # first half kick
     ex, ey = _sep_phase(B, phi, 0.25 * hs[0] * kx**2, 0.25 * hs[0] * ky**2)
     pk = pk * ex * ey
@@ -610,7 +644,32 @@ def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5, s0
         hk = 0.5 * hs[j] + (0.5 * hs[j + 1] if j + 1 < len(hs) else 0.0)
         ex, ey = _sep_phase(B, phi, 0.5 * hk * kx**2, 0.5 * hk * ky**2)
         pk = pk * ex * ey
-    return B.ifft2(pk), len(hs)
+    diag = dict(
+        kin_phase_max=float(0.5 * hs.max() * (np.abs(kx).max() ** 2 + np.abs(ky).max() ** 2)),
+        highk=(hk0, _highk_weight(B, pk, kx, ky)),
+    )
+    return B.ifft2(pk), len(hs), diag
+
+
+def spin_rotate_orders(orders, J_perp: float, tau: float):
+    """Every two-component envelope rotated by exp(-i J_perp sigma_x tau):
+        phi_1 -> cos(J tau) phi_1 - i sin(J tau) phi_2,   phi_2 -> cos(J tau) phi_2 - i sin(J tau) phi_1,
+    the coupling term of `meanfield_stage` integrated exactly. In the tail it commutes with everything else:
+    the kinetic energy is the same for both components and the interaction g(t) (|phi_1|^2 + |phi_2|^2) is
+    SU(2) invariant, so the rotation can be applied after the free or mean-field propagation of each order.
+    One-component orders, J_perp = 0 or tau = 0 are returned unchanged. Returns a new Orders."""
+    th = float(J_perp) * float(tau)
+    if th == 0.0 or not orders.envs or orders.envs[0].phi.shape[0] != 2:
+        return orders
+    c, s = math.cos(th), math.sin(th)
+    out = []
+    for e in orders.envs:
+        B = _bk(e.phi)
+        p = B.copy(e.phi)
+        p[0], p[1] = c * e.phi[0] - 1j * s * e.phi[1], c * e.phi[1] - 1j * s * e.phi[0]
+        out.append(Envelope(G=e.G, phi=p, x0=e.x0, y0=e.y0, dx=e.dx, dy=e.dy))
+    info = {**orders.info, "spin_rotation": dict(J_perp=float(J_perp), tau=float(tau), angle=th)}
+    return Orders(envs=out, t=orders.t, dropped=orders.dropped, norm_in=orders.norm_in, info=info)
 
 
 def propagate_orders(
@@ -628,6 +687,7 @@ def propagate_orders(
     dt_max=2.0,
     phase_tol=0.02,
     s0=1.0,
+    highk_check="raise",
 ):
     """Propagate every envelope from orders.t to t_end (time since release); s0: the release width of
     the mean-field tail's g(t) (`g_of_t`).
@@ -636,8 +696,9 @@ def propagate_orders(
         chi_G(r, t_end) = e^{-i|G|^2 tau/2} phi_G^free(r - G tau, tau),
         phi_G^free = IFFT[ phi~_G(q) e^{-i q^2 tau/2} ],  tau = t_end - orders.t,
     evaluated in a co-moving zero-padded box sized from the field's support:
-        half-width = (real-space extent at eps_crop)/2 + q_sup*tau + margin,
-    with q_sup the largest |q_x| (|q_y|) where |phi~|^2 > eps * max.
+        half-width = (real-space extent at eps_crop)/2 + 1.05 q_sup*tau + margin,
+    with q_sup the largest |q_x| (|q_y|) where |phi~|^2 > eps * max (plus the sound speed sqrt(2 g n_max)
+    for an order on the mean-field tail); the 5 % is headroom for the spreading tails.
     The displacement G tau is split into an integer number of coarse cells
     (origin shift) and a sub-cell remainder applied as e^{-i q.f}.
 
@@ -645,7 +706,10 @@ def propagate_orders(
     under i d_t phi = [-1/2 lap + g(t) sum_c|phi_c|^2] phi (Galilean
     invariance makes this exact once the orders no longer overlap); orders
     whose maximal nonlinear phase  max|phi|^2 int g dt  is below phase_tol
-    (rad) are propagated linearly. Steps: int g/g2D dt <= dphi, dt <= dt_max.
+    (rad) are propagated linearly. Steps: int g/g2D dt <= dphi, dt <= dt_max. Every NLS order records its
+    largest kinetic phase per step and its high-k weight (start, end) in info['propagate']; a growth of that
+    weight above NLS_HIGHK_GROWTH x max(start, floor) (floor 1e-14, 1e-8 in single precision) raises
+    (highk_check='raise', default), warns ('warn') or is only recorded ('off').
 
     periodic=True: keep each box (periodic field, e.g. Talbot tests); the
     whole displacement is applied as a phase.
@@ -655,7 +719,9 @@ def propagate_orders(
     """
     tau = float(t_end - orders.t)
     out = []
-    info = dict(boxes=[], lost=[], nls_steps=[])
+    if highk_check not in ("raise", "warn", "off"):
+        raise ValueError(f"highk_check must be 'raise', 'warn' or 'off', got {highk_check!r}")
+    info = dict(boxes=[], lost=[], nls_steps=[], nls_kin_phase_max=[], nls_highk=[])
     for e in orders.envs:
         phi = e.phi
         B = _bk(phi)
@@ -693,9 +759,24 @@ def propagate_orders(
             fx, fy = d[0] - nx * dx, d[1] - ny * dy
         nsteps = 0
         if use_nls:
-            phi, nsteps = _nls_comoving(
+            phi, nsteps, nd = _nls_comoving(
                 phi, dx, dy, orders.t, orders.t + tau, g2D, omega_z, dphi=dphi, dt_max=dt_max, s0=s0
             )
+            info["nls_kin_phase_max"].append(nd["kin_phase_max"])
+            info["nls_highk"].append(nd["highk"])
+            single = str(phi.dtype).endswith("complex64")
+            h0, h1 = nd["highk"]
+            if h1 > NLS_HIGHK_GROWTH * max(h0, 1e-8 if single else 1e-14) and highk_check != "off":
+                msg = (
+                    f"propagate_orders: the high-k weight of order G = {G} grew from {h0:.2e} to {h1:.2e} in the "
+                    f"mean-field tail ({nsteps} steps, kinetic phase up to {nd['kin_phase_max']:.1f} rad per step): "
+                    "split-step instability; lower dt_max or dphi"
+                )
+                if highk_check == "raise":
+                    raise RuntimeError(msg)
+                import warnings
+
+                warnings.warn(msg, RuntimeWarning, stacklevel=2)
             ax, ay = kx * fx, ky * fy
         else:
             ax, ay = 0.5 * tau * kx**2 + kx * fx, 0.5 * tau * ky**2 + ky * fy
@@ -1288,6 +1369,11 @@ def satellite_contrast(
         if len(ss) == 0:
             ss = np.array([0.5 * d_sat])
         mins = np.array([_disk_mean(im, center[0] + s_ * e[0], center[1] + s_ * e[1], r) for s_ in ss])
+        if not np.isfinite(mins).any():
+            raise ValueError(
+                f"satellite_contrast: no finite disk mean between the centre and the satellite along {tuple(e)} "
+                "(all-NaN image, or the disks lie outside it)"
+            )
         k = int(np.nanargmin(mins))
         Pmin = float(mins[k])
         C = (P1 - Pmin) / (P1 + Pmin) if (P1 + Pmin) > 0 else float("nan")
@@ -1353,10 +1439,16 @@ def satellite_contrast_profile(
         cnt = np.bincount(idx[ok], minlength=len(sc))
         prof = np.where(cnt > 0, num / np.maximum(cnt, 1), np.nan)
         win = np.nonzero(np.abs(sc - d_sat) <= window * d_sat)[0]
+        if len(win) == 0 or not np.isfinite(prof[win]).any():
+            raise ValueError(
+                f"satellite_contrast_profile: no finite profile bin within {window:g} d_sat of d_sat = {d_sat:g} "
+                f"along {tuple(e)} (all-NaN image, an image smaller than the satellite distance, or bins of "
+                f"{bw:g} wider than the window)"
+            )
         k1 = int(win[np.nanargmax(prof[win])])
         # P_min bins: strictly between the central bin (index 0) and the P1 bin
         mid = np.arange(1, k1)
-        if len(mid) == 0:
+        if len(mid) == 0 or not np.isfinite(prof[mid]).any():
             kmin = k1
         else:
             kmin = int(mid[np.nanargmin(prof[mid])])
@@ -1430,7 +1522,11 @@ def tof_pipeline(
     depth-of-field factor of the expanded pancake (dof=True) and no pulse push (s_sat = 0).
     s0: the vertical release width of `g_of_t` for the stage and the tail: 1 (default, the oscillator
     width: right for a fixed-g2D state), a number, or "npse" (`npse_release_width` of the input density:
-    use it for an NPSE state). Returns dict(image, orders, orders_t1, mf, s0)."""
+    use it for an NPSE state).
+    J_perp: the interlayer coupling, on for the whole expansion (default 0 = off at release): in the stage as
+    its split-step term, after it as the exact spin rotation exp(-i J_perp sigma_x (t_tof - t1)) of every
+    order (`spin_rotate_orders`; without a stage over the whole t_tof). Returns dict(image, orders, orders_t1,
+    mf, s0); orders_t1 are the orders at the end of the stage, before the tail's rotation."""
     if isinstance(s0, str):
         if s0 != "npse":
             raise ValueError(f"s0 must be a number or 'npse', got {s0!r}")
@@ -1461,6 +1557,8 @@ def tof_pipeline(
         prop = propagate_orders(orders, t_tof, eps=eps, g2D=g2D, omega_z=omega_z, s0=s0)
     else:
         prop = propagate_orders(orders, t_tof, eps=eps)
+    if J_perp != 0.0:  # the microwave stays on after the stage (or for the whole expansion without one)
+        prop = spin_rotate_orders(prop, J_perp, float(t_tof) - float(t_dem))
     im = image(
         prop, pixel=pixel, component=image_component, fov=fov, offset=offset, s_sat=s_sat, NA=NA, dof=dof, focus=focus
     )

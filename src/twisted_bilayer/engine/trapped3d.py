@@ -389,6 +389,8 @@ def model_observables(res: dict, s_sat: float = 0.01) -> dict:
             residual=m["residual"],
             converged=m["converged"],
             steps=m["steps"],
+            stop_reason=m.get("stop_reason"),
+            dtype=m.get("dtype"),
             seconds=m["seconds"],
             peak_gib=m["peak_gib"],
             C_smooth=ins["C_smooth"],
@@ -554,14 +556,14 @@ def memory_budget(fraction: float = 0.85) -> float | None:
 
 
 # The wall-time prediction (nothing else uses these). Polish steps in complex128 to tol 1e-9 on the m = 22
-# cloud at box 3, N_z = 48 (GTX 1660 Ti): 1600 (3D from the NPSE start) and 1650 / 1550 (NPSE / fixed g from
+# cloud at box 3, N_z = 48 (a 6 GB GPU): 1600 (3D from the NPSE start) and 1650 / 1550 (NPSE / fixed g from
 # the LDA start); complex64 stops at its residual floor (~1e-5) after 400-1200. The same run took 0.447 s per
 # 3D step against the probe's 0.303 s (the probe extrapolates from box 1): PROBE_TIME_FACTOR.
 STEPS_3D = 1600
 STEPS_2D = 1600
 PROBE_TIME_FACTOR = 1.5
 # The full run peaks above the probe's polish peak (the 3D start and the observables): 4.53 GiB against
-# the probe's 4.08 GiB at box 5, N_z = 32, complex64 (GTX 1660 Ti). The memory plan uses the probe x 1.15.
+# the probe's 4.08 GiB at box 5, N_z = 32, complex64 (same GPU). The memory plan uses the probe x 1.15.
 PROBE_MEMORY_FACTOR = 1.15
 
 

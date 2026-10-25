@@ -114,3 +114,19 @@ def test_panel_keeps_every_run(tmp_path, monkeypatch):
         hist = list(csv.DictReader(f))
     assert [h["verdict"] for h in hist] == ["FAIL", "PASS"] and hist[0]["failed_steps"] == "bad"
     assert hist[0]["git_commit"] == "abc1234"
+
+
+def test_history_header_grows_with_a_new_column(tmp_path):
+    """A row with a column the history file lacks used to lose it (extrasaction="ignore"); now the header
+    is extended, the old rows keep their values with an empty cell, and nothing is dropped."""
+    REC.append_history(tmp_path, "check", dict(run="a", verdict="PASS"))
+    REC.append_history(tmp_path, "check", dict(run="b", verdict="FAIL", git_dirty="True"))
+    REC.append_history(tmp_path, "check", dict(run="c", verdict="PASS"))
+    with open(tmp_path / "check" / "history.csv", newline="") as f:
+        rows = list(csv.DictReader(f))
+    assert [(r["run"], r["verdict"], r["git_dirty"]) for r in rows] == [
+        ("a", "PASS", ""),
+        ("b", "FAIL", "True"),
+        ("c", "PASS", ""),
+    ]
+    assert sorted(os.listdir(tmp_path / "check")) == ["history.csv"]

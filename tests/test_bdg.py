@@ -159,6 +159,82 @@ def test_uniform_two_component_without_coupling():
         assert np.allclose(r.spin_weight.numpy(), [s for _, s in exact], atol=1e-6)
 
 
+def test_su2_spin_rotation_is_a_kernel_vector():
+    """Omega_R = 0, equal potentials, Delta = 0, spinor at a generic angle alpha (psi0 = sqrt(n) (cos, sin)):
+    the spin rotation chi = (-psi2, psi1) is in ker A and ker B, so A^{-1} of the relative-phase vector
+    (cos 2a psi0 - sin 2a chi) does not exist. It is detected (|A chi| / |chi| = the GP residual) and the
+    constraints are built from chi and A^+ psi0: both solvers give the exact spectrum, the density branch
+    sqrt(eps (eps + 2 g n)) and the free spin branch eps, k != 0, with no CG warning (the spin weight is
+    measured in the layer basis, so it is (1 + sin 2a) / 2 here, the same in both solvers). With unequal
+    potentials the kernel is not detected (the generic path); with one component empty (a = 0) it is
+    detected when the empty component's potential is the same and not when it is 1e-8 higher (then A chi
+    = 1e-8 chi: a soft mode, not a kernel)."""
+    import warnings
+
+    gn, a = 0.4, 0.3
+    g = Grid((48,), (8.0,), device=CPU)
+    eng = BilayerGPE(g, None, g=gn, Omega_R=0.0, n_components=2)
+    psi0 = torch.zeros((1, 2, 48), dtype=C128)
+    psi0[:, 0], psi0[:, 1] = math.cos(a), math.sin(a)
+    assert float(eng.residual(psi0)[0]) < 1e-12
+    kj = 2 * np.pi * np.fft.fftfreq(48, d=8.0 / 48)
+    eps = KAPPA * kj**2
+    eps = eps[eps > 1e-14]
+    exact = np.sort(np.concatenate([_bogoliubov(eps, gn), eps]))[:8]
+    bd = BdG(eng, psi0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert bd.spin_kernel() is not None and bd.zero_modes()[0].shape[0] == 2
+        rd = bd.solve(8, method="dense")
+        r = bd.solve(8, tol=1e-9)
+    assert np.allclose(rd.omega.numpy(), exact, rtol=1e-10)
+    assert abs(rd.zero_mode_omega) < 1e-6
+    assert np.allclose(r.omega.numpy(), exact, rtol=1e-6, atol=0)
+    assert np.allclose(r.spin_weight.numpy(), rd.spin_weight.numpy(), atol=1e-6)
+    V = torch.zeros((1, 2, 48), dtype=torch.float64)
+    V[:, 1] = 0.05
+    assert BdG(BilayerGPE(g, V, g=gn, Omega_R=0.0, n_components=2), psi0).spin_kernel() is None
+    polarised = torch.zeros((1, 2, 48), dtype=C128)
+    polarised[:, 0] = 1.0
+    for d, found in ((0.0, True), (1e-8, False)):
+        V = torch.zeros((1, 2, 48), dtype=torch.float64)
+        V[:, 1] = d
+        e = BilayerGPE(g, V, g=gn, Omega_R=0.0, n_components=2)
+        assert float(e.residual(polarised)[0]) < 1e-12
+        assert (BdG(e, polarised).spin_kernel() is not None) == found
+
+
+def test_su2_lattice_spectrum_is_density_plus_spin_branch():
+    """The SU(2) gas on a 1D lattice (both components in the same V0 = 8 lattice, Omega_R = 0, Delta = 0),
+    psi0 = phi (cos a, sin a) with phi the one-component ground state of the total density: the spectrum is
+    the one-component BdG spectrum of phi (density) and the positive eigenvalues of H_GP - mu (spin, the
+    free particles in the mean field). Here psi0 is not uniform, so the preconditioner does not keep the
+    complement of chi: the projected CG of A^+ psi0 is what makes the lobpcg converge to it."""
+    import warnings
+
+    eng1, r1 = _lattice_1d(4, ppa=12)
+    g = eng1.grid
+    V = lattice_1d(g, 8.0)
+    eng2 = BilayerGPE(g, torch.cat([V, V], dim=1), g=0.2, Omega_R=0.0, n_components=2)
+    a = 0.3
+    phi = BdG(eng1, r1.psi).psi0  # real
+    psi0 = torch.cat([math.cos(a) * phi, math.sin(a) * phi], dim=1).to(C128)
+    b1 = BdG(eng1, r1.psi)
+    w_dens = b1.solve(6, method="dense").omega.numpy()
+    D = b1._dense_matrix(b1.apply_D, g.numel, torch.float64)
+    e_spin = torch.linalg.eigvalsh(0.5 * (D + D.T)).numpy()
+    e_spin = e_spin[e_spin > 1e-8]
+    exact = np.sort(np.concatenate([w_dens, e_spin]))[:6]
+    bd = BdG(eng2, psi0)
+    assert bd.spin_kernel() is not None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        rd = bd.solve(6, method="dense")
+        r = bd.solve(6, tol=1e-9)
+    assert np.allclose(rd.omega.numpy(), exact, rtol=1e-9)
+    assert np.allclose(r.omega.numpy(), exact, rtol=1e-6)
+
+
 def test_gauge_fix():
     """A global phase on psi0 changes nothing (the state is made real again
     to rounding); a psi0 that is not real up to a global phase warns."""
@@ -352,3 +428,36 @@ def test_mu_does_not_inherit_single_precision():
     assert abs(mu64_engine - mu_ref) > 1e-9  # the engine's single precision is visible
     assert BdG(e64, r.psi).mu == pytest.approx(mu_ref, rel=1e-12)
     assert BdG(e64_in_128, r.psi).mu == pytest.approx(mu_ref, rel=1e-14)
+
+
+def test_cg_keeps_an_exactly_converged_column_finite():
+    """_cg on a block whose second column has a part in the operator's kernel (it never converges):
+    the first column converges exactly (r = 0) within a few iterations and stays the solution while the
+    second one runs on, instead of turning into 0/0 = NaN."""
+    import warnings
+
+    from twisted_bilayer.engine import bdg
+
+    d = torch.tensor([0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0], dtype=torch.float64).to(torch.complex128)
+    b = torch.zeros(2, 7, dtype=torch.complex128)
+    b[0, 1:] = torch.tensor([1.0, 2.0, 0.5, -1.0, 0.3, 0.7], dtype=torch.float64)
+    b[1, :] = 1.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        x, it = bdg._cg(lambda X: X * d, b, lambda r: r, tol=1e-12, maxiter=60)
+    assert it == 60 and bool(torch.isfinite(x[0]).all())
+    assert float((x[0] * d - b[0]).abs().max()) < 1e-14
+
+
+def test_batched_potential_is_refused():
+    """A potential of shape (B, C, *N) with B > 1 is caught (engine.batch_hint looks at g, Omega_R, delta and
+    the twist only, so it used to pass and the blocks broadcast wrongly); a single potential is accepted."""
+    grid = Grid((16, 16), (6.0, 6.0), real_dtype=torch.float64)
+    V = torch.zeros(2, 2, 16, 16, dtype=torch.float64)
+    V[1] += 0.5
+    psi = torch.ones(1, 2, 16, 16, dtype=C128) / 16
+    eng = BilayerGPE(grid, V=V, g=0.1, Omega_R=0.0, delta=0.0, n_components=2, dtype=C128)
+    assert eng.batch_hint == 1
+    with pytest.raises(ValueError, match="V batch 2"):
+        BdG(eng, psi)
+    BdG(BilayerGPE(grid, V=V[:1], g=0.1, Omega_R=0.1, delta=0.0, n_components=2, dtype=C128), psi)

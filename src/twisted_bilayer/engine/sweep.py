@@ -127,8 +127,8 @@ class SweepResult:
                     Omega_R=om,
                     V0=self.spec.V0,
                     filling=self.spec.filling,
-                    m=self.geometry.m,
-                    n=self.geometry.n,
+                    geometry_m=self.geometry.m,
+                    geometry_n=self.geometry.n,
                     delta=self.spec.delta,
                     vertical=self.spec.vertical,
                 )

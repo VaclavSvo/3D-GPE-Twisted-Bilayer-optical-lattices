@@ -50,16 +50,31 @@ def mark_latest(root: str, kind: str, stamp: str) -> None:
 
 
 def append_history(root: str, kind: str, row: dict) -> None:
-    """One line per run in `<root>/<kind>/history.csv`; the header is taken from the first row written."""
+    """One line per run in `<root>/<kind>/history.csv`. The header is that of the file; a row with a column
+    the file does not have yet (a field added to the records later, e.g. git_dirty) extends the header: the
+    file is rewritten with the new columns at the end and empty cells in the older rows (through a temporary
+    file, so an interruption leaves the old file), instead of the column being dropped. Columns of the file
+    that the row lacks stay empty in its line."""
     path = os.path.join(os.path.abspath(root), kind, "history.csv")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     new = not os.path.exists(path)
+    header, old_rows = list(row), []
     if not new:
         with open(path, newline="", encoding="utf-8") as f:
-            header = next(csv.reader(f), None) or list(row)
-    else:
-        header = list(row)
+            header = next(csv.reader(f), None) or []
+        missing = [k for k in row if k not in header]
+        if missing or not header:
+            with open(path, newline="", encoding="utf-8") as f:
+                old_rows = list(csv.DictReader(f)) if header else []
+            header = header + missing
+            tmp = path + ".tmp"
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=header)
+                w.writeheader()
+                w.writerows(old_rows)
+            os.replace(tmp, path)
     with open(path, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+        w = csv.DictWriter(f, fieldnames=header)
         if new:
             w.writeheader()
         w.writerow(row)

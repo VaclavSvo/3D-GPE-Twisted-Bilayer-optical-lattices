@@ -70,10 +70,14 @@ def tiny_run():
 
 
 def test_three_models_converge(tiny_run):
+    """Each model converges and conserves N; its observables keep the solve's stop reason and precision
+    (the 3D / precision / N_z summaries are written from them)."""
     res, obs, _ = tiny_run
     for m in T3.MODELS:
         assert obs[m]["residual"] < 1e-7, m
         assert res["models"][m]["n"].sum() * res["grid2"].dV == pytest.approx(TINY.N_atoms, rel=1e-9)
+        assert obs[m]["stop_reason"] == res["models"][m]["stop_reason"] and obs[m]["stop_reason"], m
+        assert obs[m]["dtype"] == "torch.complex128", m
 
 
 def test_fixed_g_bounds_the_3d_energy_from_above(tiny_run):

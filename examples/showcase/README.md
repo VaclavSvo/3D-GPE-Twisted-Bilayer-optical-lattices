@@ -19,11 +19,11 @@ The cached results in `showcase_results/` are git-ignored, so they stay on the m
 
 1. Open `showcase.ipynb`. Set `QUICK = True` and run all cells once. That is a one-minute smoke test; its numbers are not physical.
 2. Set `QUICK = False` and run all cells again.
-   - **On the GTX 1660 Ti (6 GB):** expect roughly 50–80 min from scratch.
+   - **On a 6 GB GPU:** expect roughly 50–80 min from scratch.
      - Continuum models: about 3–5 min for 3×3 and 10–15 min for 5×5, per coupling.
      - Lattice models, on the CPU: about 5 min per coupling.
    - **Memory:** the 5×5 3D solve peaks at about 2.5 GB in complex64.
-3. **Do the full run before the meeting.** Results are cached in `showcase_results\`, so the same parameters reload in seconds. Changing a parameter (N, ν_r, a coupling, a box) computes only the new pieces.
+3. **Do the full run before you present it.** Results are cached in `showcase_results\`, so the same parameters reload in seconds. Changing a parameter (N, ν_r, a coupling, a box) computes only the new pieces.
    - With the cache in place, a 3×3 change takes a few minutes live.
    - Copy `showcase_results\` along with the notebook if you compute on another machine.
 

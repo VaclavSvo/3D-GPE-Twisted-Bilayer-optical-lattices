@@ -8,7 +8,7 @@
                                     when there is one), GPU against CPU, and the experiment's cloud: 3D
                                     against quasi-2D in complex64 and complex128 against pinned numbers, the
                                     vertical and in-plane resolution, and the 3D size planner. Needs a GPU;
-                                    about 30-60 minutes on a 12 GB consumer card. Run it after every big change.
+                                    about 30-60 minutes on a GPU with 12 GB. Run it after every big change.
     twisted-bilayer panel broad --only gates_full,gpu_cpu      a subset; --list shows the steps
 
 Each step returns pass or fail with the numbers behind it, and every run keeps all of them on disk
@@ -94,9 +94,12 @@ def _check(ok_list, label, ok, detail) -> None:
 
 
 def _outcome(checks, numbers=None) -> Outcome:
+    """A step's outcome from its checks; a step with no checks has measured nothing and fails."""
     lines = [f"{'ok ' if ok else 'FAIL'} {label}: {detail}" for label, ok, detail in checks]
+    if not checks:
+        lines = ["FAIL no checks: the step produced nothing to compare (not a pass)"]
     return Outcome(
-        ok=all(ok for _, ok, _ in checks),
+        ok=bool(checks) and all(ok for _, ok, _ in checks),
         lines=lines,
         numbers=numbers or {},
         checks=[dict(label=label, ok=ok, detail=detail) for label, ok, detail in checks],
@@ -271,9 +274,11 @@ def _nz_checks(conv, limit, tag) -> list:
 
     rows, checks = conv["rows"], []
     fin, sec = rows[-1]["observables"], rows[-2]["observables"]
+    tiny = []
     for k in T3.NZ_KEYS:
         gap = abs(fin[k] - conv["npse"][k])
-        if gap < 1e-6:
+        if gap < 1e-6:  # no 3D - NPSE gap to measure the N_z error against
+            tiny.append(k)
             continue
         rel = abs(sec[k] - fin[k]) / gap
         _check(
@@ -281,6 +286,14 @@ def _nz_checks(conv, limit, tag) -> list:
             f"{tag} N_z {rows[-2]['Nz']} vs {rows[-1]['Nz']}: {k}",
             rel <= limit,
             f"{rel:.1%} of the 3D - NPSE gap (<= {limit:.0%})",
+        )
+    if not checks:  # every gap below 1e-6: the step has nothing to test, which must not read as a pass
+        _check(
+            checks,
+            f"{tag} N_z {rows[-2]['Nz']} vs {rows[-1]['Nz']}",
+            False,
+            f"no observable with a 3D - NPSE gap above 1e-6 ({', '.join(tiny)}): nothing to measure the N_z "
+            "error against",
         )
     return checks
 
@@ -535,20 +548,38 @@ def _provenance() -> dict:
 
 
 def _verdict(results) -> tuple[str, int, int]:
+    """PASS only if at least one step ran and every step passed."""
     n_fail = sum(r["ok"] is False for r in results)
     n_skip = sum(r["ok"] is None for r in results)
+    if not results:
+        return "INCOMPLETE", 0, 0
     return ("PASS" if n_fail == 0 and n_skip == 0 else ("FAIL" if n_fail else "INCOMPLETE")), n_fail, n_skip
+
+
+def select_steps(name: str, only=None, skip=None) -> list:
+    """The steps of panel `name` named by `only` (all if empty) minus `skip`. An unknown step name, or a
+    selection with no step left, is a ValueError naming the valid steps (never an empty run)."""
+    if name not in PANELS:
+        raise ValueError(f"unknown panel {name!r}; panels: {', '.join(PANELS)}")
+    names = [s.name for s in PANELS[name]]
+    unknown = sorted({x for x in (*(only or ()), *(skip or ())) if x not in names})
+    if unknown:
+        raise ValueError(f"panel {name}: unknown step(s) {', '.join(unknown)}; steps: {', '.join(names)}")
+    steps = [s for s in PANELS[name] if (not only or s.name in only) and s.name not in (skip or ())]
+    if not steps:
+        raise ValueError(f"panel {name}: the selection leaves no step to run; steps: {', '.join(names)}")
+    return steps
 
 
 def run_panel(name: str, out_root: str | None = None, only=None, skip=None) -> int:
     """Run the panel's steps; every run goes to its own folder <out_root>/panel_<name>/<date_time>/ (layout in
     `records` and the module docstring). Returns 0 if all steps ran and passed, 1 on a failure, 2 if a step
-    was skipped."""
+    was skipped. An unknown step name in `only` or `skip` raises ValueError before anything is written."""
     from twisted_bilayer.engine.backend import describe_device
 
+    steps = select_steps(name, only, skip)
     out_root = out_root or default_out_root()
     kind = f"panel_{name}"
-    steps = [s for s in PANELS[name] if (not only or s.name in only) and s.name not in (skip or ())]
     out, stamp = REC.run_dir(out_root, kind)
     device = describe_device()
     started = time.strftime("%Y-%m-%d %H:%M:%S")

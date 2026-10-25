@@ -62,3 +62,33 @@ def test_npse_is_closer_to_3d_than_fixed_g():
     err_npse = abs(n["mu_2d_npse"] - n["mu_3d_minus_zpe"])
     assert err_npse < 0.5 * err_fixed
     assert n["n_peak_2d"] < n["n_peak_3d"] * 1.0 + 1e-9  # fixed width underestimates the pocket density
+
+
+def test_thin_z_stage_tolerances(monkeypatch):
+    """thin_z_check's solves: one complex128 stage relaxes straight to tol; a complex64 stage, the only
+    one or the first of two, stops at max(tol, 1e-5), its rounding floor; the complex128 polish after a
+    complex64 stage goes to tol."""
+    import torch
+
+    from twisted_bilayer.engine import thin_z as TZ
+
+    real = TZ.relax
+
+    def run(dr, dp):
+        seen = []
+
+        def spy(eng, psi, n, tol=1e-7, **kw):
+            seen.append((eng.dtype, tol))
+            return real(eng, psi, n, tol=tol, **kw)
+
+        monkeypatch.setattr(TZ, "relax", spy)
+        kw = dict(V0=4.0, Omega_R=0.2, m=2, n=1, points_per_a=6, Nz=8, z_extent_lz=3.0, npse=False, verbose=False)
+        TZ.thin_z_check(tol=1e-7, dtype_relax=dr, dtype_polish=dp, **kw)
+        return seen
+
+    assert {t for _, t in run("complex128", "complex128")} == {1e-7}
+    assert {t for _, t in run("complex64", "complex64")} == {1e-5}
+    two = run("complex64", "complex128")
+    assert {t for d, t in two if d == torch.complex64} == {1e-5} and {t for d, t in two if d == torch.complex128} == {
+        1e-7
+    }

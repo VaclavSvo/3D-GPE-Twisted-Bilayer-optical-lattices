@@ -41,9 +41,22 @@ class GateResult:
     tol: float | None = None
 
 
+def _nonfinite(vals: list[float]) -> str | None:
+    """None when every value is finite; else a detail naming the first NaN or inf frame. Python's max keeps
+    its first operand on a NaN comparison, so a drift taken with max over a list that turns NaN after frame 0
+    would be the drift of the finite frames only: every drift gate checks this first."""
+    for i, v in enumerate(vals):
+        if not math.isfinite(v):
+            return f"non-finite value {v} at frame {i} of {len(vals)}"
+    return None
+
+
 def rel_drift_gate(name: str, values, tol: float, kind: str = "conservation") -> GateResult:
-    """Max relative drift from the first value (norm, energy: nonzero reference)."""
+    """Max relative drift from the first value (norm, energy: nonzero reference). Fails on any NaN or inf."""
     vals = [float(v) for v in values]
+    bad = _nonfinite(vals)
+    if bad:
+        return GateResult(name, False, bad, kind, float("nan"), vals[0] if vals else None, tol)
     ref = vals[0]
     if abs(ref) < 1e-30:
         return GateResult(name, False, "reference value is zero; use abs_drift_gate", kind)
@@ -54,11 +67,15 @@ def rel_drift_gate(name: str, values, tol: float, kind: str = "conservation") ->
 
 
 def abs_drift_gate(name: str, values, scale: float, tol: float, kind: str = "conservation") -> GateResult:
-    """Max absolute drift against a characteristic scale (quantities whose reference is ~0)."""
+    """Max absolute drift against a characteristic scale (quantities whose reference is ~0). Fails on any NaN
+    or inf."""
     vals = [float(v) for v in values]
+    lim = tol * max(scale, 1e-30)
+    bad = _nonfinite(vals)
+    if bad:
+        return GateResult(name, False, bad, kind, float("nan"), vals[0] if vals else None, lim)
     ref = vals[0]
     drift = max(abs(v - ref) for v in vals)
-    lim = tol * max(scale, 1e-30)
     return GateResult(
         name,
         drift < lim,
@@ -107,7 +124,8 @@ class GateSuite:
 
     @property
     def passed(self) -> bool:
-        return all(r.passed for r in self.results)
+        """All gates passed; a suite with no gates has checked nothing and does not pass."""
+        return bool(self.results) and all(r.passed for r in self.results)
 
     def report(self) -> str:
         return report(self.results, header=f"{self.engine} / {self.scenario}")
@@ -130,7 +148,10 @@ def report(results: list[GateResult], header: str | None = None) -> str:
             if r.kind == k:
                 lines.append(f"  [{'PASS' if r.passed else 'FAIL'}] {r.name}: {r.detail}")
     n_fail = sum(not r.passed for r in results)
-    lines.append("ALL GATES PASSED" if n_fail == 0 else f"GATE FAILURE: {n_fail} of {len(results)} failed")
+    if not results:
+        lines.append("NO GATES RUN: nothing was checked (not a pass)")
+    else:
+        lines.append("ALL GATES PASSED" if n_fail == 0 else f"GATE FAILURE: {n_fail} of {len(results)} failed")
     return "\n".join(lines)
 
 
@@ -182,6 +203,10 @@ def conservation_gates(
         out.append(abs_drift_gate("N2_over_N (J_perp = 0)", history["N2_over_N"], 1.0, tol_N2, kind="identity"))
     if "highk" in history:
         h = [float(x) for x in history["highk"]]
+        bad = _nonfinite(h)
+        if bad:
+            out.append(GateResult("high-k weight", False, bad, "conservation", float("nan"), 1.0, highk_growth))
+            return out
         ref = max(h[0], 1e-14)
         growth = max(h) / ref
         out.append(
@@ -205,12 +230,13 @@ def imaginary_time_gates(
     out = []
     if "mu" in history and len(history["mu"]) >= window:
         mu = [float(x) for x in history["mu"]][-window:]
-        spread = (max(mu) - min(mu)) / max(abs(mu[-1]), 1e-30)
+        bad = _nonfinite(mu)
+        spread = float("nan") if bad else (max(mu) - min(mu)) / max(abs(mu[-1]), 1e-30)
         out.append(
             GateResult(
                 "mu plateau",
                 spread < tol_mu_plateau,
-                f"spread over last {window} frames {spread:.3e} (tol {tol_mu_plateau:.1e})",
+                bad or f"spread over last {window} frames {spread:.3e} (tol {tol_mu_plateau:.1e})",
                 "convergence",
                 spread,
                 0.0,

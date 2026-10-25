@@ -37,7 +37,9 @@ from twisted_bilayer.engine.units import KAPPA, lattice_units
 from twisted_bilayer.records import write_json
 
 VERBOSE = True  # progress output of the long runs
-TOL_GATES = 0.01  # pass/fail tolerance on norm and energy drift of a real-time run
+# pass/fail tolerances on the relative norm and energy drift of a real-time run (run_rabi): the gate suite's
+# values for the same quantities of a unitary split step (A2, A3). rabi_quick drifts by 5e-13 and 8e-10.
+TOL_NORM, TOL_ENERGY = 1e-9, 1e-7
 _OUT_ROOT = "results"  # set by run_scenario
 
 
@@ -104,7 +106,7 @@ def run_bridge(name: str, row: dict) -> None:
     shift) against the continuum GPE on the same supercell at fixed g2d (manybody.bridge): mu, E/N from
     each model's band bottom, f_s, the AA/AB density ratio, N2/N and the participation ratio over V0 and
     Omega_R, as a table, a json and a figure of the differences. One gate: mu - E_bottom at V0 = 16,
-    Omega_R = 0 within 5 %."""
+    Omega_R = 0 within 3 % (manybody.bridge.GATE_TOL)."""
     from twisted_bilayer.manybody.bridge import BridgeSpec, bridge, format_bridge, save_bridge
 
     torch.set_num_threads(min(4, os.cpu_count() or 1))
@@ -126,6 +128,37 @@ def run_bridge(name: str, row: dict) -> None:
     _section("result")
     print(format_bridge(res))
     print(f"wrote {out}/bridge.{{txt,json,png}}")
+
+
+# ── phase maps: single-site and cluster Gutzwiller ────────────────────────────
+
+
+def run_phase_diagram(name: str, row: dict) -> None:
+    """Phase map over (V0, Omega_R) with single-site or cluster Gutzwiller (manybody.phase_diagram): labels
+    SF / SF-II / I / MI / empty / ?, f_s(theta -> 0), visibilities, P(n_max); maps.npz, labels.png,
+    summary.json, report.txt and phase_diagram_provenance.json in results/<name>/ (resumable: a rerun continues
+    the map). The row names its entry of manybody.phase_diagram.ROWS as "base"; other keys override it, except
+    the run controls "device", "max_hours", "redo_unconverged" and "force_resume"."""
+    from twisted_bilayer.manybody import phase_diagram as PD
+
+    torch.set_num_threads(min(4, os.cpu_count() or 1))
+    ctl = ("kind", "base", "device", "max_hours", "redo_unconverged", "force_resume")
+    spec = dict(PD.ROWS[row.get("base", name)])
+    spec.update({k: v for k, v in row.items() if k not in ctl})
+    out = _outdir(name)
+    _section("run")
+    summary = PD.run_row(
+        name,
+        out,
+        device=row.get("device", "cpu"),
+        max_hours=row.get("max_hours"),
+        row=spec,
+        redo_unconverged=bool(row.get("redo_unconverged", False)),
+        force_resume=bool(row.get("force_resume", False)),
+        provenance_file="phase_diagram_provenance.json",
+    )
+    _section("result")
+    print(PD.format_report(name, spec, PD._load_npz(os.path.join(out, "maps.npz")), summary))
 
 
 # ── thin-z check ───────────────────────────────────────────────────────────────
@@ -223,7 +256,7 @@ def run_rabi(name: str, row: dict) -> None:
         f"Omega_eff = {om_eff:.4f} E_R = {units.ER_to_hz(om_eff):.0f} Hz; Omega_eff/Omega_R = {om_eff / row['Omega_R']:.3f} "
         f"(Franck-Condon |c_00|^2 = {bands._bloch_1d(row['V0'], np.array([0.0]), 31)[1][0, 15, 0] ** 4:.4f})"
     )
-    results = conservation_gates(history, tol_norm=TOL_GATES, tol_energy=TOL_GATES)
+    results = conservation_gates(history, tol_norm=TOL_NORM, tol_energy=TOL_ENERGY)
     print(report(results, header=f"engine / {name}"))
     out = _outdir(name)
     with open(os.path.join(out, "rabi.csv"), "w") as f:
@@ -260,14 +293,28 @@ def run_rabi(name: str, row: dict) -> None:
         fig.savefig(os.path.join(out, "rabi.png"), dpi=150)
     except Exception as e:  # plotting is optional
         print(f"(no plot: {e})")
+    hz = 1.0 / units.lattice_time_to_s(1.0)  # E_R / hbar in 1/s
     with open(os.path.join(out, "run_metadata.json"), "w") as f:
         json.dump(
-            dict(row=row, dt=dt, f_peak=f_peak, f_bare=f_bare, gates=[g.__dict__ for g in results]),
+            dict(
+                row=row,
+                dt=dt,
+                f_peak=f_peak,
+                f_bare=f_bare,
+                f_units="f_peak, f_bare: frequency of the N2/N oscillation, Omega/pi in cycles per (hbar/E_R) "
+                "(lattice frequency units, not Hz); f_peak_hz, f_bare_hz: the same in Hz (= 2 Omega / h)",
+                f_peak_hz=f_peak * hz,
+                f_bare_hz=f_bare * hz,
+                Omega_eff_ER=om_eff,
+                gates=[g.__dict__ for g in results],
+            ),
             f,
             indent=2,
             default=str,
         )
     print(f"wrote {out}/rabi.{{csv,png}}")
+    if not all(g.passed for g in results):  # a physics failure is a failing run (exit code 1)
+        raise SystemExit(f"{name}: conservation gates failed; the files above are written for inspection")
 
 
 # ── 1D toy regression ──────────────────────────────────────────────────────────
@@ -664,11 +711,29 @@ GPU_KEYS = [
 GPU_TOL = {"fs_xx_energy": 1e-4, "fs_xx_current": 1e-4, "fs_yy_energy": 1e-4}
 
 
+def compare_gpu_cpu(gpu: dict, cpu: dict) -> tuple[bool, list[str], dict]:
+    """max |GPU - CPU| of every GPU_KEYS column against GPU_TOL (1e-6 by default). A missing column or a
+    non-finite difference fails. Returns (ok, report lines, {key: dict(diff, tol, ok)})."""
+    ok, lines, table = True, [], {}
+    for k in GPU_KEYS:
+        if k not in gpu or k not in cpu:
+            d = float("nan")
+        else:
+            d = float(np.max(np.abs(np.asarray(gpu[k]) - np.asarray(cpu[k]))))
+        tol = GPU_TOL.get(k, 1e-6)
+        good = bool(np.isfinite(d) and d < tol)
+        ok &= good
+        table[k] = dict(diff=d, tol=tol, ok=good)
+        lines.append(f"  [{'OK ' if good else 'FAIL'}] {k:>22s}: max |GPU - CPU| = {d:.2e} (tol {tol:g})")
+    return ok, lines, table
+
+
 def run_gpu_check(name: str, row: dict) -> None:
     """The quick coupling-scan pipeline (m = 4, 12 pts/a, Omega_R = 0, 0.24, 1, complex128) on the GPU and in
     a CPU subprocess (TWISTED_BILAYER_FORCE_CPU=1), every number compared: 1e-6 on energies, 1e-4 on the
     superfluid fractions (an energy difference ~1e-3 E_R against ~80 E_R, so the last digits differ
-    between cuFFT and pocketfft). Then the m = 22 production supercell is timed."""
+    between cuFFT and pocketfft). Then the m = 22 production supercell is timed. A mismatch writes
+    gpu_cpu.json, skips the timing and ends the run with exit code 1."""
     from twisted_bilayer.engine.backend import HAS_GPU
 
     print("GPU:", describe_device())
@@ -699,13 +764,12 @@ def run_gpu_check(name: str, row: dict) -> None:
     gpu = run_quick(os.path.abspath(os.path.join(out, "gpu")), force_cpu=False)
     print("quick pipeline on the CPU ...")
     cpu = run_quick(os.path.abspath(os.path.join(out, "cpu")), force_cpu=True)
-    ok = True
-    for k in GPU_KEYS:
-        d = float(np.max(np.abs(gpu[k] - cpu[k])))
-        tol = GPU_TOL.get(k, 1e-6)
-        ok &= d < tol
-        print(f"  [{'OK ' if d < tol else 'FAIL'}] {k:>22s}: max |GPU - CPU| = {d:.2e} (tol {tol:g})")
+    ok, lines, table = compare_gpu_cpu(gpu, cpu)
+    print("\n".join(lines))
     print("GPU == CPU within tolerance" if ok else "GPU/CPU MISMATCH -- do not trust GPU numbers")
+    write_json(os.path.join(out, "gpu_cpu.json"), dict(ok=ok, device=describe_device(), keys=table))
+    if not ok:  # a physics failure is a failing run: no timing, exit code 1
+        raise SystemExit(f"{name}: GPU/CPU mismatch (gpu_cpu.json); the production timing is skipped")
     if not row.get("time_production", True):
         return
     print("\ntiming the production supercell (m = 22, 16 pts/a, 4 couplings, complex64 -> complex128) ...")
@@ -1120,6 +1184,7 @@ KINDS = {
     "toy1d": run_toy1d,
     "tight_binding": run_tight_binding,
     "bridge": run_bridge,
+    "phase_diagram": run_phase_diagram,
     "bdg": run_bdg,
     "trapped": run_trapped,
     "gpu_check": run_gpu_check,
