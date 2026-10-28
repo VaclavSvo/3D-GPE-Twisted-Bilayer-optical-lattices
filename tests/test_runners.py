@@ -15,6 +15,24 @@ def test_every_scenario_kind_has_a_runner():
     assert not missing, missing
 
 
+def test_tight_binding_variants_and_the_shipped_row():
+    """Variant D is C plus the interband shift of the site energies only (same bonds, same interlayer pairs);
+    the shipped row keeps the variants A, B and C."""
+    import numpy as np
+
+    from twisted_bilayer.engine import lattice_model as lm
+
+    assert SCENARIOS["tight_binding"]["variants"] == "ABC"
+    assert set(runners.MODEL_C_VARIANTS) == set("ABCD")
+    c = lm.build_model(12.0, 0.5, 4, 1, **runners.MODEL_C_VARIANTS["C"][1])
+    d = lm.build_model(12.0, 0.5, 4, 1, **runners.MODEL_C_VARIANTS["D"][1])
+    np.testing.assert_array_equal(c.bonds.rows, d.bonds.rows)
+    np.testing.assert_array_equal(c.bonds.amp, d.bonds.amp)
+    np.testing.assert_array_equal(c.V_pairs[2], d.V_pairs[2])
+    shift = np.asarray(d.onsite) - np.asarray(c.onsite)
+    assert np.abs(shift).max() > 1e-4 and shift.max() <= 1e-12  # second-order shifts lower the sites
+
+
 def test_trapped_runner_records_containment_and_checks(tmp_path):
     verbose, out_root = runners.VERBOSE, runners._OUT_ROOT
     runners.VERBOSE = False

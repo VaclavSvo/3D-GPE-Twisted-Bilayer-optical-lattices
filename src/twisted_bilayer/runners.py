@@ -107,7 +107,7 @@ def run_bridge(name: str, row: dict) -> None:
     each model's band bottom, f_s, the AA/AB density ratio, N2/N and the participation ratio over V0 and
     Omega_R, as a table, a json and a figure of the differences. One gate: mu - E_bottom at V0 = 16,
     Omega_R = 0 within 3 % (manybody.bridge.GATE_TOL)."""
-    from twisted_bilayer.manybody.bridge import BridgeSpec, bridge, format_bridge, save_bridge
+    from twisted_bilayer.manybody.bridge import BridgeSpec, bridge, format_bridge, save_bridge, save_bridge_partial
 
     torch.set_num_threads(min(4, os.cpu_count() or 1))
     spec = BridgeSpec(**{k: row[k] for k in row if k != "kind"})
@@ -122,8 +122,8 @@ def run_bridge(name: str, row: dict) -> None:
     )
     print(f"V0 = {spec.V0}, Omega_R = {spec.Omega_R}, filling {spec.filling}, nu_z = {spec.nu_z_hz:g} Hz")
     _section("run")
-    res = bridge(spec, verbose=VERBOSE)
     out = _outdir(name)
+    res = bridge(spec, verbose=VERBOSE, on_block=lambda partial: save_bridge_partial(partial, out))
     save_bridge(res, out)
     _section("result")
     print(format_bridge(res))
@@ -402,6 +402,10 @@ MODEL_C_VARIANTS = {
     "A": ("one neighbour: S cut at |d| < 1, lattice-1 frame, no interlayer interaction", {}),
     "B": ("S cut at |d| < 2", {"cutoff": 2.0}),
     "C": ("S cut at |d| < 2 + interlayer interaction V_ij", {"cutoff": 2.0, "interlayer_interaction": True}),
+    "D": (
+        "C + the interband shift of the site energies (no interband bonds)",
+        {"cutoff": 2.0, "interlayer_interaction": True, "interband": True, "interband_bonds": False},
+    ),
 }
 
 
@@ -413,7 +417,8 @@ def run_tight_binding(name: str, row: dict) -> None:
       A  the one-neighbour model (S cut at |d| < 1, lattice-1 frame, no interlayer interaction)
          -- the reference table;
       B  S cut at |d| < 2 (removes the cusp the |d| = 1 cutoff puts into the k = 0 coupling next to AA);
-      C  B plus the interlayer density-density interaction V_ij (a12 = a11, as in the continuum model).
+      C  B plus the interlayer density-density interaction V_ij (a12 = a11, as in the continuum model);
+      D  C plus the second-order interband shift of the site energies (not in the shipped row).
     Also the single-particle k = 0 levels against the continuum (bands.moire_bands_q0) at compare_m."""
     from twisted_bilayer.engine import lattice_model as lm
 
