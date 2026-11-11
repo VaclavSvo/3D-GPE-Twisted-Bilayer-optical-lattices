@@ -8,7 +8,7 @@ authors:
     affiliation: "University of Vienna"
 license: MIT
 repository-code: "https://github.com/VaclavSvo/3D-GPE-Twisted-Bilayer-optical-lattices"
-version: 0.1.0
+version: 0.2.0
 keywords:
   - Bose-Einstein condensate
   - Gross-Pitaevskii equation

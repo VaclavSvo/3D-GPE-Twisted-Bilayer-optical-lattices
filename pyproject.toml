@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "twisted-bilayer"
-version = "0.1.0"
+version = "0.2.0"
 description = "Two-component Gross-Pitaevskii simulations of a Bose-Einstein condensate in twisted-bilayer optical lattices, in PyTorch"
 readme = "README.md"
 license = "MIT"
@@ -43,7 +43,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-m 'not slow' --import-mode=importlib"
-markers = ["slow: full gate suites on the real engine (minutes); run with -m slow"]
+markers = ["slow: tests over ~20 s on one core (the quick gate suite, the long solver and TOF checks); run with -m slow or check.py --all"]
 
 [tool.ruff]
 line-length = 120

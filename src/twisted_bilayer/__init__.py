@@ -6,4 +6,4 @@ and absorption imaging), `gates` (physics gates). Parameters: `config` (inputs) 
 (derived constants and unit conversions). Command line: `twisted-bilayer` (`cli`).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
