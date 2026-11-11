@@ -53,7 +53,7 @@ from . import imaging, units
 from .backend import REAL_OF, complex_dtype, to_numpy
 from .grid import Grid
 from .ground_state import initial_state, relax, renormalise
-from .lattice import bilayer_potential, harmonic_trap, moire_geometry
+from .lattice import MoireGeometry, bilayer_potential, harmonic_trap, moire_geometry
 from .npse import NPSE2D
 from .physics import BilayerGPE
 
@@ -72,7 +72,21 @@ class UncontainedCloud(ValueError):
 
 @dataclass
 class TrappedSpec:
-    """One trapped-cloud run. Energies in E_R; nu_r_hz and omega_z_hz in Hz."""
+    """One trapped-cloud run (`trapped_ground_state`). Lengths in a, energies in E_R, frequencies in Hz.
+
+    V0: depth of each layer's square lattice (E_R). Omega_R: interlayer coupling (E_R). N_atoms: atoms in the
+    cloud (both components). nu_r_hz: radial trap frequency (Hz; isotropic in the plane). box_cells: the
+    periodic box in supercells per side (odd, so that an AA point sits at the origin). cell_points: grid
+    points per supercell side (176 = 8 per a for the sqrt(485) cell). vertical: "npse" (density-dependent
+    width, `engine.npse`) or "fixed" (g_2D n). g2d: the 2D coupling (E_R a^2); None derives it from
+    omega_z_hz and a_s = 100 a0 (`engine.units`). omega_z_hz: vertical trap frequency (Hz). fillings: atoms
+    per a^2 of the supercell scan that builds the LDA start. noise, seed: amplitude and seed of the random
+    perturbation added to the start (`add_noise`). tol: residual at which the polish stops (E_R). scan_tol:
+    the same for the supercell scan. polish_steps: step budget of the polish (raise it per row for a slow
+    cloud: a descent that cannot reach tol in it stops "slow"). m, n: the commensurate twist,
+    tan(theta / 2) = n / m. dtype: "complex128" or "complex64" for the trapped solve (the scan is always
+    complex128). containment: "refuse" | "enlarge" | "warn", what `resolve_box` does when the cloud is wider
+    than the box."""
 
     V0: float = 4.0
     Omega_R: float = J_PROD
@@ -117,7 +131,7 @@ def _engine(
     return BilayerGPE(grid, V=V, g=g, Omega_R=J, dtype=dt)
 
 
-def supercell_grid(spec: TrappedSpec):
+def supercell_grid(spec: TrappedSpec) -> tuple[Grid, MoireGeometry]:
     geo = moire_geometry(spec.m, spec.n)
     return Grid((spec.cell_points,) * 2, (geo.L_box,) * 2), geo
 
@@ -276,7 +290,7 @@ def add_noise(psi: np.ndarray, grid: Grid, noise: float, seed: int) -> np.ndarra
 
 
 # ----------------------------------------------------------------------------- the trapped state
-def trap_grid(spec: TrappedSpec):
+def trap_grid(spec: TrappedSpec) -> tuple[Grid, MoireGeometry]:
     geo = moire_geometry(spec.m, spec.n)
     Nb = spec.box_cells * spec.cell_points
     Lb = spec.box_cells * geo.L_box

@@ -124,7 +124,7 @@ ANCHORS = {
     "E_z0_code": (
         0.6707839391,
         1e-9,
-        "hbar omega_z / 2 = parameters.OMEGA_Z / 2 (0.6707839384 before 24 Oct: 1.07e-9 off)",
+        "hbar omega_z / 2 = parameters.OMEGA_Z / 2",
     ),
     "fs_twist_J0.243_n1_fixedg": (
         0.6128,
@@ -173,6 +173,18 @@ ANCHORS = {
 }
 
 
-def anchor(name: str):
+# Anchors that no gate reads: documented values of the same calculations, kept for comparison with other codes
+# and by hand (the gates read their siblings: the band bottom through plane waves on the spot, the supercell E/N
+# in E_R, the 2D mu and f_s). `tests/test_gates.py` checks that this list and the suite agree.
+UNREAD_BY_GATES = (
+    "band_bottom_1d_4ER_ER",
+    "supercell_EN_4ER_g0_J0_code",
+    "mu3d_minus_Ez0_J0.243_n3_code",
+    "fs_g0_4ER_m_over_mstar",
+    "toy1d_fs_V8_gn0.2_energy",
+)
+
+
+def anchor(name: str) -> tuple[float, float, str]:
     v, tol, src = ANCHORS[name]
     return v, tol, src

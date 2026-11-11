@@ -2,13 +2,13 @@
 each with its tolerance and source. Lattice units (E_R, a); mu and E/N of the 3D cloud without hbar omega_z/2.
 
 QUICK_3D: the small trapped cloud of `trapped_3d_quick` (m = 4, 3 x 3 cells of 32 points, N = 60, 200 Hz,
-V0 = 4 E_R, Omega_R = 0.24277 E_R, N_z = 16 over +-5 l_z), complex128, residual < 1e-9 E_R. Source: CPU run
-of `trapped3d.solve_models` on 15 Oct 2026 (repo state of that day). Tolerances: 1e-8 E_R on energies (the
+V0 = 4 E_R, Omega_R = 0.24277 E_R, N_z = 16 over +-5 l_z), complex128, residual < 1e-9 E_R. Source: a CPU run
+of `trapped3d.solve_models` with these settings. Tolerances: 1e-8 E_R on energies (the
 solve converges the residual to ~5e-10), 1e-6 on densities and contrasts (device and FFT library).
 
 EXPERIMENT_3D: the experiment's cloud of `gpu_precision` (m = 22, 3 x 3 supercells at 176 points, N = 2000,
 20 Hz), complex128. Source: `gpu_precision` on two different GPUs (N_z = 48 and N_z = 64),
-15 Oct 2026, identical in every printed digit. Tolerances cover the printed rounding (8 decimals on energies,
+identical in every printed digit. Tolerances cover the printed rounding (8 decimals on energies,
 5 on contrasts) and, for the 3D cloud, a coarser N_z (the panel runs N_z = 32; `gpu_3d_nz` puts N_z >= 16
 within the complex64 floor).
 """

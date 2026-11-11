@@ -9,6 +9,10 @@
     twisted-bilayer gates [--full] [--trapped]      the physics gates (see twisted_bilayer.gates)
     twisted-bilayer panel quick | broad             every check with one verdict (see twisted_bilayer.panel)
 
+Exit codes of `run`: 0 done; 1 a failed physics check (and any error); 2 a usage error (an unknown scenario);
+3 a trapped run that finished but whose cloud is not contained in its box (edge density >= 1e-3 of the peak;
+its files are written, `checks.contained` is false in summary.json).
+
 The engine picks its device when it is imported, so this module imports it only after the command line
 has decided whether the run must stay on the CPU.
 """

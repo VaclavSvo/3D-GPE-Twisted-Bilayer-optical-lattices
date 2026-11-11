@@ -38,6 +38,8 @@ An independent quasi-2D split-step solver using the same definitions gives ident
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 import torch
 
@@ -138,7 +140,9 @@ def _pixel_centres(origin: float, lo: float, hi: float, pixel: float) -> np.ndar
 
 
 # ------------------------------------------------------------------------------ imaging
-def image(n2: np.ndarray, box: Box, sigma: float = PSF_SIGMA, pixel: float = PIXEL, origin=(0.0, 0.0), extent=None):
+def image(
+    n2: np.ndarray, box: Box, sigma: float = PSF_SIGMA, pixel: float = PIXEL, origin=(0.0, 0.0), extent=None
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """In-situ image of a column density through the legacy Gaussian PSF, averaged over square
     pixels centred at origin + pixel (i, j) (one pixel on the AA point), over `extent` =
     (xmin, xmax, ymin, ymax) (default: the box). Returns (xc, yc, img), img in atoms/a^2."""
@@ -219,12 +223,12 @@ def transfer_contrasts(n2: np.ndarray, box: Box, transfer, L: float = L_SUPERCEL
     return out
 
 
-def coherent_transfer(s_sat: float):
+def coherent_transfer(s_sat: float) -> Callable[[np.ndarray], np.ndarray]:
     """H(|k|) of coherent absorption imaging at saturation s_sat (see tof.coherent_transfer_k)."""
     return lambda k: tof.coherent_transfer_k(k, s=s_sat)
 
 
-def pupil_transfer(k):
+def pupil_transfer(k) -> np.ndarray:
     """The in-focus amplitude pupil alone: H = 1 below NA / lambda_probe (2.20 rad/a), else 0."""
     k_c = 2.0 * np.pi * (P.NA_IMG / P.LAMBDA_PROBE_UM) * P.A_UM
     return (np.asarray(k, float) < k_c).astype(float)

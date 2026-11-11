@@ -1,7 +1,8 @@
 """Run every check of the repository; one summary at the end.
 
     python check.py                 lint + the test suite (~5 min on 2 CPU cores)
-    python check.py --all           + the slow test: the quick physics-gate suite (~1 min more)
+    python check.py --all           + the slow tests (~10 min more): the quick physics-gate suite and every test
+                                    over ~20 s on one core
     python check.py --only tests    one part (see --list)
 
 Run from the repository root after `pip install -e ".[dev]"`. Everything runs on the CPU (GPU runs are
@@ -38,7 +39,7 @@ PARTS = {
     "tests_slow": (
         [PY, "-m", "pytest", "-q", "-m", "slow"],
         False,
-        "the quick physics-gate suite as one test (~1 min)",
+        "the slow tests: the quick physics-gate suite and the tests over ~20 s (~10 min)",
     ),
 }
 

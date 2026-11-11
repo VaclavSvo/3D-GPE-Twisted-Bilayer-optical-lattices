@@ -71,6 +71,26 @@ def renormalise(engine: BilayerGPE, psi: torch.Tensor, n_particles) -> torch.Ten
     return psi * _bcast(factor, psi).to(psi.dtype)
 
 
+def _relative_phases(engine: BilayerGPE, batch: int) -> list[float]:
+    """The default relative phase of component 2 (rad) of `initial_state`: [p] when every batch member gets the
+    same phase, else one phase per member. A member starts on its lower dressed branch: pi for Omega_R > 0, 0 for
+    Omega_R < 0; a member with Omega_R = 0 (no branch to choose) takes the batch's phase, pi when any Omega_R > 0."""
+    om = engine.Omega_R
+    if not torch.is_tensor(om):
+        return [math.pi if float(om) > 0.0 else 0.0]
+    vals = [float(x) for x in om.reshape(-1)]
+    default = math.pi if max(vals) > 0.0 else 0.0
+    phases = [math.pi if x > 0.0 else 0.0 if x < 0.0 else default for x in vals]
+    if all(p == phases[0] for p in phases):
+        return [phases[0]]
+    if len(phases) != batch:
+        raise ValueError(
+            f"Omega_R mixes signs over {len(phases)} batch members but the start has batch={batch}: each member "
+            "needs its own relative phase (pass batch=len(Omega_R), or relative_phase explicitly)"
+        )
+    return phases
+
+
 def initial_state(
     engine: BilayerGPE,
     n_particles,
@@ -82,18 +102,22 @@ def initial_state(
     phase_noise: float = 0.0,
     relative_phase: float | None = None,
 ) -> torch.Tensor:
-    """A starting field (B, C, *N) with n_particles atoms per member.
+    """A starting field (B, C, *N) with n_particles atoms per member (scalar or (B,)); batch = B.
 
     kind: "uniform"  -- flat density (the right start on a periodic supercell)
-          "gaussian" -- centred Gaussian of the given width (for traps)
+          "gaussian" -- centred Gaussian of the given width (in a; default L_min / 8) (for traps)
           "thomas_fermi" -- sqrt(max(mu - V, 0)) with mu fitted to N (needs V)
+    seed: of the phase_noise field (None: torch's unseeded generator).
     fractions: share of atoms in each component (C = 2).
-    relative_phase: phase of component 2 relative to component 1. With the
-    paper's +Omega_R sigma_x coupling the LOWER dressed state is the
-    antisymmetric combination, so the default is pi when Omega_R > 0 (0 when
-    Omega_R < 0 or absent). Starting symmetric would converge to the upper
-    dressed state and stay there: the layer-swap + y -> -y mirror is an
-    exact symmetry of the bilayer that imaginary time cannot break.
+    relative_phase: phase of component 2 relative to component 1 (rad), the
+    same for every member. With the paper's +Omega_R sigma_x coupling the
+    LOWER dressed state is the antisymmetric combination, so the default
+    (None) is chosen per batch member: pi when Omega_R > 0, 0 when
+    Omega_R < 0 or absent; a member with Omega_R = 0 takes pi when any member
+    has Omega_R > 0. A batch that mixes signs needs batch = len(Omega_R).
+    Starting symmetric would converge to the upper dressed state and stay
+    there: the layer-swap + y -> -y mirror is an exact symmetry of the
+    bilayer that imaginary time cannot break.
     phase_noise: standard deviation (rad) of a random phase field added on
     top, for independent-seed checks of the inter-pocket phases.
     """
@@ -128,13 +152,11 @@ def initial_state(
         amp = amp * f.reshape(1, 2, *([1] * g.d))
     psi = amp.to(engine.dtype)
     if engine.C == 2:
-        if relative_phase is None:
-            om = engine.Omega_R
-            om_max = float(om.max()) if torch.is_tensor(om) else float(om)
-            relative_phase = math.pi if om_max > 0.0 else 0.0
-        if relative_phase != 0.0:
-            ph = torch.ones((1, 2) + (1,) * g.d, dtype=engine.dtype, device=g.device)
-            ph[:, 1] = complex(math.cos(relative_phase), math.sin(relative_phase))
+        phases = _relative_phases(engine, batch) if relative_phase is None else [float(relative_phase)]
+        if any(p != 0.0 for p in phases):
+            ph = torch.ones((len(phases), 2) + (1,) * g.d, dtype=engine.dtype, device=g.device)
+            for i, p in enumerate(phases):
+                ph[i, 1] = complex(math.cos(p), math.sin(p))
             psi = psi * ph
     if phase_noise > 0.0:
         ph = torch.randn(shape, generator=gen, dtype=torch.float64) * phase_noise
@@ -188,7 +210,22 @@ def relax(
     0, `precondition_polish` takes over -- on the supercell it does most of
     the work: the ladder is worth ~1e-3 in residual in a few hundred steps,
     the polish the remaining six orders of magnitude.
-    """
+
+    Parameters (energies in the engine's units, E_R in lattice units; times in hbar / E_R):
+        engine: the `BilayerGPE` (its dtype sets the precision of the solve).
+        psi0: the start (B, C, *N); renormalised to n_particles first.
+        n_particles: atoms per batch member (scalar or (B,)); kept fixed throughout.
+        tol: residual ||H psi - mu psi|| / ||psi|| (E_R) at which a member counts as converged.
+        dt_schedule: the imaginary-time steps of the ladder; None builds it with `dt_ladder` from dt_start
+            and dt_min (default 0.5 / (kappa k_max^2)); [] skips the ladder (polish only).
+        max_steps_per_stage, check_every, stall_ratio: the ladder's step cap per stage, the steps between
+            residual checks, and the fraction the residual must fall below per check to stay in a stage.
+        polish_steps: the polish's step budget (0: no polish). polish_tau, polish_beta, polish_alpha,
+            polish_stall_windows: tau, beta, alpha and stall_windows of `precondition_polish`.
+        verbose: print one line per stage and per polish window.
+
+    Returns a `RelaxResult`: psi, residual, mu, energy (E_total) and converged per member, the total steps,
+    the stages and the stop_reason."""
     psi = renormalise(engine, psi0.to(engine.dtype), n_particles)
     schedule = dt_schedule if dt_schedule is not None else dt_ladder(engine, psi, dt_start, dt_min)
     total = 0
@@ -290,6 +327,18 @@ def _energy_rose(E, E_prev, eps: float) -> bool:
     return bool(((e - e0) > 1e3 * eps * torch.maximum(s, s0)).any())
 
 
+def _energy_fell(E, E_prev, eps: float, res) -> bool:
+    """True when no batch member's total energy rose by more than its rounding level (as in `_energy_rose`) and
+    the member with the largest residual `res` (B,) fell by more than it: the state is still descending."""
+    (e, s), (e0, s0) = E, E_prev
+    e, s, e0, s0 = (torch.as_tensor(x, dtype=torch.float64).reshape(-1) for x in (e, s, e0, s0))
+    level = 1e3 * eps * torch.maximum(s, s0)
+    if bool(((e - e0) > level).any()):
+        return False
+    i = int(torch.as_tensor(res).reshape(-1).argmax()) if e.numel() > 1 else 0
+    return bool((e - e0)[i] < -level[i])
+
+
 def precondition_polish(
     engine: BilayerGPE,
     psi: torch.Tensor,
@@ -303,7 +352,7 @@ def precondition_polish(
     stall_windows: int | None = None,
     info: dict | None = None,
     verbose: bool = False,
-):
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Preconditioned gradient descent with momentum (heavy ball) on E[psi]
     at fixed N:
 
@@ -317,22 +366,31 @@ def precondition_polish(
 
     Overshoot: when the residual rises between two checks the momentum is
     reset, tau is halved (never below 1e-3 tau_0, stop_reason "tau_floor")
-    and the run restarts from the best state. In a complex128 engine one
-    rise of the residual while the total energy did not rise (by more than
-    1e3 eps times the sum of the magnitudes of its terms) is let through, and
-    that window is left out of the stall and rate tests: the descent lowers
-    E, not the residual, which can bump up at first order in tau on a state
-    that is still descending -- restarting there halves tau down to its
-    floor. A second rise in a row, or a rise in the first window after a
-    restart, is an overshoot whatever E does: an unstable mode grows the
-    residual by a factor per window while its energy stays below the
-    rounding level, and a state that rises right after a restart from the
-    best one is at a floor. Near the residual's own rounding level (below
-    1e4 eps alpha) the residual-only test applies in complex128 too: there a
-    rise is rounding noise, and halving tau is what lowers the floor. A
-    single-precision engine keeps the residual-only test throughout (its
-    energy changes near the rounding floor are below its precision), so
-    every complex64 solve is unchanged.
+    and the run restarts from the best state -- unless, in a complex128
+    engine, the energy says the state is still descending. The rounding
+    level of E is 1e3 eps times the sum of the magnitudes of its terms:
+    - E fell by more than its rounding level (and rose for no member): the
+      descent goes on at the same tau, however often this happens, also in
+      the first window after a restart, and the stall and rate tests start
+      again from this window. The descent lowers E, not the residual: near a
+      stationary point (a plateau, or a slow exit along a soft direction)
+      the residual stays flat or rises for many windows while E falls
+      steadily, and restarting there halves tau down to its floor (a 12 E_R
+      trapped cloud at fixed g: E fell by 2e-4 E_R per window, 7e4 times its
+      rounding level, through ten restarts).
+    - E within its rounding level: one such rise is let through and left
+      out of the stall and rate tests; a second rise in a row, or one in the
+      first window after a restart, is an overshoot (an unstable mode grows
+      the residual by a factor per window while its energy change stays
+      below the rounding level; a state that does not lower E right after a
+      restart from the best one is at a floor).
+    - E rose: an overshoot.
+    Near the residual's own rounding level (below 1e4 eps alpha) the
+    residual-only test applies in complex128 too: there a rise is rounding
+    noise, and halving tau is what lowers the floor. A single-precision
+    engine keeps the residual-only test throughout (its energy changes near
+    the rounding floor are below its precision), so every complex64 solve
+    is unchanged.
 
     Stop: at tol, at max_steps, or when the residual has stopped falling: by
     less than 0.5 % over the last `stall_windows` check windows (since the
@@ -348,7 +406,20 @@ def precondition_polish(
     stops at its rounding floor where a longer window only costs steps (so
     every complex64 solve, and the complex64 first stage of a two-precision
     solve, is unchanged). A passed `info` dict receives stop_reason ("tol", "stall",
-    "slow", "max_steps", "tau_floor")."""
+    "slow", "max_steps", "tau_floor").
+
+    The "slow" stop is an extrapolation, not a verdict on the state: a deep
+    lattice's soft phase mode can need 1e5 steps or more (the 12 E_R NPSE
+    cloud 95 500, twisted solves at 20-24 E_R 124 250-269 900). Give such a
+    run the budget it needs (max_steps; `TrappedSpec.polish_steps`,
+    `Vertical.polish_steps`, `SweepSpec.max_polish_steps`).
+
+    Parameters: tol, the residual to reach (E_R); max_steps, the step budget;
+    tau (dimensionless; the step is tau P r with P in 1 / E_R) and beta, the
+    heavy ball's step and momentum; alpha (E_R), the preconditioner's shift
+    (default the local energy scale); check_every, steps per residual check
+    (a window). Returns (psi_best, residual_best (B,), steps): the state of
+    the lowest residual seen, not necessarily the last."""
     g = engine.grid
     if alpha is None:
         alpha = max(local_energy_scale(engine, psi), 1e-3)
@@ -389,6 +460,14 @@ def precondition_polish(
             reason = "tol"
             break
         if cur > prev:
+            if energy_test and cur > floor and _energy_fell(E_cur, E_prev, eps, res):
+                # the residual rose while E fell measurably: still descending (a slow exit from near a stationary
+                # point, where the residual first rises). Go on at this tau, as often as it happens; the stall and
+                # rate tests start again from this window (they compare residuals, and this is not a stall)
+                bumped = True
+                hist = [cur]
+                prev, E_prev = cur, E_cur
+                continue
             if energy_test and not bumped and cur > floor and not _energy_rose(E_cur, E_prev, eps):
                 # one rise of the residual while E did not rise: go on, and leave this window out of the
                 # stall and rate tests (they compare residuals, and a bump is not a stall)

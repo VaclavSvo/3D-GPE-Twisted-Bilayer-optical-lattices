@@ -89,6 +89,15 @@ def thin_z_check(
     device: torch.device | None = None,
     npse: bool = True,
 ) -> ThinZResult:
+    """The quasi-2D reductions against a full 3D solve on the homogeneous supercell (lengths in a, energies in E_R).
+
+    V0: lattice depth (E_R); Omega_R: interlayer coupling (E_R); filling: atoms per a^2; m, n: the twist,
+    tan(theta_moire / 2) = n / m; points_per_a: in-plane grid; Nz, z_extent_lz: the z grid, Nz points over
+    +-z_extent_lz l_z (l_z of omega_z_hz, in a); omega_z_hz: vertical trap (Hz); delta: detuning (E_R); tol:
+    the ground states' residual (E_R); with_fs, theta: also the superfluid fraction from a phase twist theta
+    (rad); dtype_relax, dtype_polish: precisions of the relaxation and the polish; npse: compare the NPSE as
+    well as the fixed g_2D. Returns a `ThinZResult`: numbers (mu, E/N, participation ratio, contrast and peak
+    density of each model; with with_fs, f_s), the column densities and the width map <z^2> / (l_z^2 / 2)."""
     device = DEVICE if device is None else device
     units = lattice_units(omega_z_hz=omega_z_hz)
     geo = moire_geometry(m, n)

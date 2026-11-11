@@ -109,7 +109,7 @@ SCENARIOS = {
     "rabi_quick": dict(
         kind="rabi",
         V0=V0_ER,
-        Omega_R=J_PERP_ER[0.243],  # 0.24277 E_R, as every other row (0.243 before 24 Oct)
+        Omega_R=J_PERP_ER[0.243],  # 0.24277 E_R, as every other row
         filling=1.0,
         m=4,
         n=1,

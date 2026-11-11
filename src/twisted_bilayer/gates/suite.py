@@ -156,7 +156,7 @@ t_er = P.t_code_to_er  # a time: code units -> hbar/E_R
 res_tol = P.code_to_er  # a residual tolerance in code energy units -> E_R
 
 
-def supercell_grid(N: int):
+def supercell_grid(N: int) -> tuple[Grid, lat.MoireGeometry]:
     geo = lat.moire_geometry(22, 1)
     assert abs(geo.L_box - L485) < 1e-12
     return Grid((N, N), (geo.L_box, geo.L_box)), geo
@@ -172,7 +172,7 @@ def make_engine(
     C: int = 2,
     g_npse: float = G2D_ER,
     delta: float = 0.0,
-):
+) -> phys.BilayerGPE:
     inter = npse.NPSE2D(g_npse, WZ_ER) if vertical == "npse" else None
     return phys.BilayerGPE(
         grid,
@@ -187,14 +187,14 @@ def make_engine(
     )
 
 
-def field_from(grid, amp1: np.ndarray, amp2: np.ndarray | None = None):
+def field_from(grid, amp1: np.ndarray, amp2: np.ndarray | None = None) -> torch.Tensor:
     """(1, C, *N) complex128 tensor from per-component numpy amplitudes in grid ('ij') order."""
     comps = [amp1] if amp2 is None else [amp1, amp2]
     arr = np.stack(comps)[None].astype(np.complex128)
     return torch.as_tensor(arr, device=grid.device)
 
 
-def mesh(grid):
+def mesh(grid) -> tuple[np.ndarray, ...]:
     """Coordinate arrays in the engine's ('ij') order, numpy float64."""
     xs = [x.numpy() for x in grid.x64]
     return np.meshgrid(*xs, indexing="ij")
@@ -237,7 +237,9 @@ def record(hist: dict, eng, psi, t: float, mask: np.ndarray) -> dict:
     return terms
 
 
-def evolve_recording(eng, psi, dt: float, nsteps: int, every: int, hist: dict, callback=None, order: int = 2):
+def evolve_recording(
+    eng, psi, dt: float, nsteps: int, every: int, hist: dict, callback=None, order: int = 2
+) -> torch.Tensor:
     """nsteps real-time steps of the engine's run_block, a history frame (and callback(t, psi)) every
     `every` steps; t in hbar/E_R."""
     mask = highk_mask(eng.grid)
@@ -255,7 +257,7 @@ def evolve_recording(eng, psi, dt: float, nsteps: int, every: int, hist: dict, c
     return psi
 
 
-def residual_gate(tag: str, residual: float, code_target: float):
+def residual_gate(tag: str, residual: float, code_target: float) -> list[GateResult]:
     return tagged(H.imaginary_time_gates({"residual": [residual]}, residual_target=res_tol(code_target)), tag)
 
 
@@ -279,12 +281,16 @@ class Context:
         if self.verbose:
             print(f"  .. {msg}", file=sys.stderr, flush=True)
 
-    def supercell(self, N: int, J: float, g: float, vertical: str, twist=None, g_npse: float = G2D_ER):
+    def supercell(
+        self, N: int, J: float, g: float, vertical: str, twist=None, g_npse: float = G2D_ER
+    ) -> phys.BilayerGPE:
         grid, geo = supercell_grid(N)
         V = lat.bilayer_potential(grid, 4.0, geo)
         return make_engine(grid, V, J=J, g=g, vertical=vertical, twist=twist, g_npse=g_npse)
 
-    def ground(self, N: int, J: float, nbar: float, vertical: str, g: float = G2D_ER, code_tol: float = 1e-9):
+    def ground(
+        self, N: int, J: float, nbar: float, vertical: str, g: float = G2D_ER, code_tol: float = 1e-9
+    ) -> tuple[phys.BilayerGPE, gs.RelaxResult]:
         """Polished ground state on the sqrt(485) cell (V0 = 4 E_R) from the engine's own start
         (uniform, component 2 at phase pi for J > 0), relax = ladder + heavy-ball polish."""
         key = (N, J, nbar, vertical, g, code_tol)
@@ -841,8 +847,8 @@ def gate_D_preflight(suite: GateSuite, ctx: Context) -> dict:
     """[preflight] The NPSE parameter kappa = g2D n_peak / hbar omega_z at nbar = 1 (gate) and nbar = 5
     (expected-FAIL demonstration in meta), and, recorded in values only, the engine's own real-time step on
     the production supercell (176^2): `choose_dt_values` at order 2 and at order 4 with the `rabi` multiplier
-    20. Those were gates until 24 Oct; they test choose_dt's constants, not the run, and moved to
-    tests/test_gates.py."""
+    20. They test choose_dt's constants, not the run, so they are unit tests (tests/test_gates.py), not
+    gates."""
     c = twisted_cell_case(ppa=8)
     eng, r = ctx.ground(176, er(c["J"]), 1.0, "fixed")
     dx = eng.grid.dx

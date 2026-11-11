@@ -17,8 +17,12 @@ engines, `dtype_relax` / `dtype_polish` of its scenario row).
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:  # annotations only
+    import numpy as np
 
 _FORCE_CPU = os.environ.get("TWISTED_BILAYER_FORCE_CPU", "").strip().lower() not in ("", "0", "false", "no")
 HAS_GPU = torch.cuda.is_available() and not _FORCE_CPU
@@ -44,7 +48,7 @@ def describe_device() -> str:
     return f"CPU ({torch.get_num_threads()} threads), torch {torch.__version__}"
 
 
-def to_numpy(a):
+def to_numpy(a) -> np.ndarray:
     return a.detach().cpu().numpy()
 
 

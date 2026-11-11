@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import math
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -447,19 +448,19 @@ class BdG:
             return torch.zeros_like(F)
         return self.gpsi0.to(F.dtype) * (self.psi0.to(F.dtype) * F).sum(dim=1, keepdim=True)
 
-    def apply_L(self, F):
+    def apply_L(self, F) -> torch.Tensor:
         return self.apply_D(F) + self.apply_X(F)
 
-    def apply_M(self, F):
+    def apply_M(self, F) -> torch.Tensor:
         return self.apply_X(F)
 
-    def apply_A(self, F):
+    def apply_A(self, F) -> torch.Tensor:
         return self.apply_D(F) + 2.0 * self.apply_X(F)
 
-    def apply_B(self, F):
+    def apply_B(self, F) -> torch.Tensor:
         return self.apply_D(F)
 
-    def preconditioner(self, shift: float):
+    def preconditioner(self, shift: float) -> Callable[[torch.Tensor], torch.Tensor]:
         """F -> F(k) / (kappa |k + q|^2 + shift): the kinetic preconditioner."""
         g = self.grid
         inv = 1.0 / (self.kin + shift)
@@ -480,7 +481,7 @@ class BdG:
         return max(1.0, 0.5 * (float(self.loc.abs().max()) + abs(self.Omega_R)))
 
     # -- zero modes ------------------------------------------------------------------------
-    def zero_modes(self):
+    def zero_modes(self) -> torch.Tensor | None:
         """At q = 0: (Z, P) with Z (z, C, *N) the Goldstone h-vectors (psi0, and
         (psi1, -psi2) when C = 2 and Omega_R = 0) and P the h-constraint vectors,
         P^H h = 0 for every mode with w != 0: P = A^{-1} Z. None at q != 0.
@@ -521,7 +522,7 @@ class BdG:
             self._zero = (Z, P)
         return self._zero
 
-    def spin_kernel(self):
+    def spin_kernel(self) -> torch.Tensor | None:
         """chi = (-psi2, psi1), the generator of the spin rotation, if it is in the kernel
         of A (C = 2, Omega_R = 0, q = 0), else None. A chi = (-D_1 psi2, D_2 psi1) (X chi = 0
         identically): zero when both components see the same D (V1 = V2, Delta = 0) and psi0
@@ -700,7 +701,9 @@ class BdG:
         return out
 
     # -- mode observables --------------------------------------------------------------------
-    def mode_observables(self, u: torch.Tensor, v: torch.Tensor):
+    def mode_observables(
+        self, u: torch.Tensor, v: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Per mode (each (m,)):
 
         * participation ratio of rho = sum_sigma |u|^2 + |v|^2:

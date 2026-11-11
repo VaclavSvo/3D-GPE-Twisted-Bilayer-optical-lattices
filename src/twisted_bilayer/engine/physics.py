@@ -41,6 +41,42 @@ _YOSHIDA_MID = 1.0 - 2.0 * _YOSHIDA_THETA
 
 
 class BilayerGPE:
+    """The two-component (or one-component) GPE on a periodic grid, batched over parameters.
+
+    Units are the lattice units of `engine.units`: lengths in the lattice constant a, energies in the recoil
+    energy E_R, hbar = 1, so time is in hbar / E_R and the mass enters only through kappa = 1/pi^2. Fields
+    psi have shape (B, C, *N): batch member, component, then the grid axes; |psi|^2 is atoms per a^d (d = the
+    grid's dimension), so `norm` integrates to the atom number.
+
+    Parameters (each scalar, or a (B,) sequence / tensor batched over the members; the batched ones must all
+    have length B or 1):
+        grid: the periodic `Grid` (box lengths in a; its device sets the engine's). Read-only afterwards.
+        V: the potential in E_R: (*N), (1 or B, 1, *N) shared by both components (a trap, one lattice), or
+            (1 or B, C, *N) per component (the two layers' lattices). None: no potential. Finite everywhere.
+        g: contact coupling in E_R a^d per atom (the mean field is g n, n = |psi_1|^2 + |psi_2|^2: SU(2)
+            symmetric). In 2D the quasi-2D g_2D of `engine.units`. Must be >= 0 unless allow_attractive.
+        Omega_R: the interlayer (Rabi) coupling in E_R, the off-diagonal element of the local 2 x 2
+            Hamiltonian (+Omega_R sigma_x). Its sign selects which dressed branch is lower: see
+            `ground_state.initial_state`.
+        delta: detuning in E_R, entering as +delta/2 on component 1 and -delta/2 on component 2.
+        kappa: kinetic prefactor in E_R a^2 (H_kin = -kappa nabla^2); 1/pi^2 in lattice units. Finite, > 0;
+            read-only afterwards.
+        n_components: C, 1 or 2 (Omega_R and delta act only for 2).
+        twist: phase twists theta_i in rad across the box, psi(r + L_i e_i) = e^{i theta_i} psi(r): None, a
+            (d,) sequence, or a (B, d) tensor; changed later with `set_twist`.
+        dtype: torch.complex128 (default) or torch.complex64; real parts use the matching real dtype.
+        interaction: optional density functional replacing g n (e.g. `engine.npse.NPSE2D`, the quasi-2D
+            NPSE); then g is ignored in H and E (pass g = 0). Not batchable.
+        allow_attractive: accept g < 0. Default False: an attractive g is refused as a likely sign error.
+
+    Construction raises ValueError for a non-finite input, kappa <= 0, g < 0 without allow_attractive,
+    batched inputs of different lengths, or a non-complex dtype. No physics range is imposed.
+
+    Main methods: `run_block` (real time, order 2 or 4), `imaginary_step`, `energy_terms` (E_kin, E_pot, E_int,
+    E_delta, E_rabi, E_total in E_R and mu in E_R per member), `apply_H`, `residual` (||H psi - mu psi|| /
+    ||psi|| in E_R, the ground-state criterion), `current`, `norm`, `to_dtype`. Ground states:
+    `engine.ground_state.relax`."""
+
     def __init__(
         self,
         grid: Grid,
@@ -53,12 +89,18 @@ class BilayerGPE:
         twist=None,
         dtype: torch.dtype = torch.complex128,
         interaction=None,
+        allow_attractive: bool = False,
     ):
         if n_components not in (1, 2):
             raise ValueError("n_components must be 1 or 2")
-        self.grid = grid
+        if dtype not in REAL_OF:
+            raise ValueError(f"dtype must be a complex torch dtype ({', '.join(map(str, REAL_OF))}), got {dtype!r}")
+        kappa = float(kappa)
+        if not (math.isfinite(kappa) and kappa > 0.0):
+            raise ValueError(f"kappa must be finite and > 0, got {kappa!r}")
+        self._grid = grid
         self.C = n_components
-        self.kappa = float(kappa)
+        self._kappa = kappa
         self.dtype = dtype
         self.rdtype = REAL_OF[dtype]
         self.device = grid.device
@@ -72,6 +114,52 @@ class BilayerGPE:
         self.set_twist(twist)
         self._ops_cache: dict = {}
         self._ksq = None
+        self._check_inputs(allow_attractive)
+
+    # -- read-only geometry ---------------------------------------------------
+    @property
+    def grid(self) -> Grid:
+        """The spatial grid (read-only: the cached kinetic operators depend on it; build a new engine, or use
+        `to_dtype`, for another grid)."""
+        return self._grid
+
+    @property
+    def kappa(self) -> float:
+        """The kinetic prefactor kappa in H = -kappa nabla^2 (1/pi^2 in lattice units, E_R a^2 / pi^2;
+        read-only: the cached kinetic operators depend on it)."""
+        return self._kappa
+
+    def _check_inputs(self, allow_attractive: bool) -> None:
+        """Construction checks: every input finite, g >= 0 unless allow_attractive, the batched
+        parameters of one length (or 1), the potential's leading axis 1 or that length. No physics range
+        limits."""
+
+        def finite(name, x):
+            ok = bool(torch.isfinite(x).all()) if torch.is_tensor(x) else math.isfinite(float(x))
+            if not ok:
+                raise ValueError(f"{name} must be finite everywhere")
+
+        if self.V is not None:
+            finite("V", self.V)
+        for name in ("g", "Omega_R", "delta"):
+            finite(name, getattr(self, name))
+        if self.twist is not None:
+            finite("twist", self.twist)
+        g = self.g
+        g_min = float(g.min()) if torch.is_tensor(g) else float(g)
+        if g_min < 0.0 and not allow_attractive:
+            raise ValueError(f"g = {g_min!r} < 0 (attraction): pass allow_attractive=True to run it")
+        lengths = {}
+        for name in ("g", "Omega_R", "delta"):
+            p = getattr(self, name)
+            if torch.is_tensor(p) and p.shape[0] > 1:
+                lengths[name] = p.shape[0]
+        if self.twist is not None and self.twist.shape[0] > 1:
+            lengths["twist"] = self.twist.shape[0]
+        if self.V is not None and self.V.shape[0] > 1:
+            lengths["V"] = self.V.shape[0]
+        if len(set(lengths.values())) > 1:
+            raise ValueError(f"batched inputs differ in length: {lengths} (each must be 1 or the batch size)")
 
     # -- parameters -----------------------------------------------------------
     def _as_potential(self, V: torch.Tensor) -> torch.Tensor:
@@ -130,6 +218,8 @@ class BilayerGPE:
             t = t.reshape(1, -1)
         if t.shape[1] != self.grid.d:
             raise ValueError(f"twist must have {self.grid.d} components, got {tuple(t.shape)}")
+        if not bool(torch.isfinite(t).all()):
+            raise ValueError("twist must be finite")
         self.twist = t
         self.q = []
         for ax in range(self.grid.d):
@@ -153,7 +243,7 @@ class BilayerGPE:
         eng = BilayerGPE.__new__(BilayerGPE)
         eng.__dict__.update(self.__dict__)
         eng.dtype, eng.rdtype = dtype, REAL_OF[dtype]
-        eng.grid = self.grid.to(eng.rdtype)
+        eng._grid = self.grid.to(eng.rdtype)
         eng.V = None if self.V is None else self.V.to(eng.rdtype)
         for name in ("g", "Omega_R", "delta"):
             p = getattr(self, name)
@@ -277,8 +367,9 @@ class BilayerGPE:
 
     # -- real-time propagation --------------------------------------------------
     def run_block(self, psi: torch.Tensor, n_steps: int, dt: float, order: int = 2) -> torch.Tensor:
-        """Advance psi by n_steps steps of dt. Returns the new field (psi is
-        not modified in place, but is consumed: do not reuse the input)."""
+        """Advance psi by n_steps real-time steps of dt (hbar / E_R) with the Strang (order 2) or Yoshida
+        (order 4) split step. Returns the new field (psi is not modified in place, but is consumed: do not
+        reuse the input). `choose_dt` gives an accuracy-safe dt."""
         if n_steps < 0:
             raise ValueError("n_steps must be >= 0")
         if n_steps == 0:

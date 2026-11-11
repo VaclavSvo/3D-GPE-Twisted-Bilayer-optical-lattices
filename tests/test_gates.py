@@ -162,7 +162,7 @@ def test_suite_module_device_defaults_to_the_imported_device(monkeypatch):
     assert EA.main(["--quiet", "--device", "cpu"]) == 0 and seen["device"] == "cpu"
 
 
-# ------------------------------------------- (vi) checks that were gates which could not fail (17 Oct audit)
+# ------------------------------------------- (vi) checks that cannot fail in a run, so tests instead of gates
 def test_one_component_runs_have_no_N2_gate():
     """A2 and A3 are one-component runs whose N2/N is written as 0.0 every frame, so a gate on it could not
     fail; B8 (two components at J = 0) keeps its N2/N gate."""
@@ -192,3 +192,19 @@ def test_band_bottom_literals_agree():
     for name, J in (("dressed_band_bottom_J0.2428_code", 1.19802), ("dressed_band_bottom_J0.1214_code", 0.599)):
         assert P.E0_BAND_BOTTOM[J] == R.anchor(name)[0]
     assert R.anchor("dressed_band_bottom_J0.2428_ER")[1] > R.anchor("dressed_band_bottom_J0.2428_code")[1]
+
+
+def test_unread_anchors_are_marked():
+    """Every anchor is read by the gate suite (by name, or by the trapped-cloud prefix) or listed in
+    references.UNREAD_BY_GATES, and nothing listed there is read."""
+    import inspect
+
+    from twisted_bilayer.gates import references as R
+    from twisted_bilayer.gates import suite
+
+    text = inspect.getsource(suite)
+    read = {n for n in R.ANCHORS if f'"{n}"' in text or (n.startswith("trapped_N2000_") and "trapped_N2000_" in text)}
+    other = {"E_z0_code", "dressed_band_bottom_J0.2428_ER", "square_lattice_UJ_c_gutzwiller", "square_lattice_UJ_c_qmc"}
+    assert set(R.UNREAD_BY_GATES) <= set(R.ANCHORS)
+    assert not set(R.UNREAD_BY_GATES) & read
+    assert set(R.ANCHORS) - read - other == set(R.UNREAD_BY_GATES)

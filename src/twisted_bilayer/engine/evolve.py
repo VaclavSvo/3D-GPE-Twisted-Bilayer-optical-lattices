@@ -76,7 +76,7 @@ def run_and_record(
     observer=None,
     progress: bool = False,
     t0: float = 0.0,
-):
+) -> tuple[dict, torch.Tensor]:
     """Advance psi through n_blocks x steps_per_block real-time steps of dt,
     recording diagnostics at t0 and after every block.
 

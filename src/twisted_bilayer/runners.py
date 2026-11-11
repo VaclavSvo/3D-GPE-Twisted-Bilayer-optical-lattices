@@ -639,6 +639,20 @@ def run_bdg(name: str, row: dict) -> None:
 # ── trapped clouds ─────────────────────────────────────────────────────────────
 
 
+# A trapped run that finished but whose cloud is not contained (edge density / peak >= 1e-3) ends with this
+# exit code after its files are written (the box refusal before the solve and the other failures exit 1,
+# usage errors 2).
+EXIT_UNCONTAINED = 3
+_UNCONTAINED: list[str] = []
+
+
+def _note_containment(label: str, contained) -> None:
+    """Record a finished trapped solve whose cloud is not contained; `run_scenario` exits with
+    EXIT_UNCONTAINED once the run's files are written."""
+    if contained is False:
+        _UNCONTAINED.append(label)
+
+
 def run_trapped(name: str, row: dict) -> None:
     """LDA start from the supercell coupling scan -> polished trapped ground state; cloud numbers and
     in-situ contrasts (imaging.standard_observables, via trapped.summary); the field to fields/state.npz."""
@@ -698,6 +712,7 @@ def run_trapped(name: str, row: dict) -> None:
     _section("result")
     print("\n".join(lines))
     print(f"wrote {out}/summary.{{json,txt}}, fields/state.npz")
+    _note_containment(name, res["checks"]["contained"])
 
 
 # ── GPU certification ──────────────────────────────────────────────────────────
@@ -946,6 +961,7 @@ def run_trapped_3d(name: str, row: dict) -> None:
     print(head)
     print(report)
     print(f"wrote {out}/summary.json, report.txt, comparison_{dtype}.png, fields/columns_{dtype}.npz")
+    _note_containment(name, chk["contained"])
 
 
 def run_trapped_3d_precision(name: str, row: dict) -> None:
@@ -1052,6 +1068,8 @@ def run_trapped_3d_precision(name: str, row: dict) -> None:
     _section("result")
     print("\n".join(lines))
     print(f"wrote {out}/summary.json, report.txt, comparison_<dtype>.png, fields/columns_<dtype>.npz")
+    for d in dtypes:
+        _note_containment(f"{name} ({d})", chk[d]["contained"])
 
 
 def run_trapped_3d_nz(name: str, row: dict) -> None:
@@ -1121,6 +1139,7 @@ def run_trapped_3d_nz(name: str, row: dict) -> None:
     print(head)
     print(report)
     print(f"wrote {out}/summary.json, report.txt")
+    _note_containment(name, chk["contained"])
 
 
 def run_xy_convergence(name: str, row: dict) -> None:
@@ -1174,6 +1193,8 @@ def run_xy_convergence(name: str, row: dict) -> None:
     _section("result")
     print(text)
     print(f"wrote {out}/summary.json, report.txt, supercell.csv, trapped.csv")
+    for r in (conv_tr or {}).get("rows", []):
+        _note_containment(f"{name} (cell_points {r['cell_points']})", r.get("checks", {}).get("contained"))
 
 
 def dataclasses_asdict(obj) -> dict:
@@ -1253,7 +1274,9 @@ def double_precision(row: dict) -> dict:
 
 def run_scenario(name: str, row: dict, out_root: str = "results", double: bool = False) -> None:
     """Run one scenario row; files go to <out_root>/<name>/ (provenance.json included). double=True
-    (`--128` on the command line) runs it in complex128 throughout."""
+    (`--128` on the command line) runs it in complex128 throughout. A trapped run that finishes with a cloud
+    not contained in its box (`checks.contained` false) raises SystemExit(EXIT_UNCONTAINED) = 3 after every
+    file is written; a failed physics check raises SystemExit with a message (exit code 1)."""
     global _OUT_ROOT
     _OUT_ROOT = out_root
     if row["kind"] not in KINDS:
@@ -1267,6 +1290,7 @@ def run_scenario(name: str, row: dict, out_root: str = "results", double: bool =
             "precision: " + ", ".join(f"{k} = {row.get(k, 'default')}" for k in keys) + (" (--128)" if double else "")
         )
     t0 = time.time()
+    _UNCONTAINED.clear()
     KINDS[row["kind"]](name, row)
     out = _outdir(name)
     with open(os.path.join(out, "provenance.json"), "w") as f:
@@ -1274,3 +1298,10 @@ def run_scenario(name: str, row: dict, out_root: str = "results", double: bool =
             dict(scenario=name, row=row, seconds=round(time.time() - t0, 1), **_provenance()), f, indent=2, default=str
         )
     print(f"\ndone in {time.time() - t0:.1f} s")
+    if _UNCONTAINED:
+        print(
+            f"WARNING: the cloud is not contained in its box (edge density >= 1e-3 of the peak): "
+            f"{', '.join(_UNCONTAINED)}; exit code {EXIT_UNCONTAINED}",
+            file=sys.stderr,
+        )
+        raise SystemExit(EXIT_UNCONTAINED)

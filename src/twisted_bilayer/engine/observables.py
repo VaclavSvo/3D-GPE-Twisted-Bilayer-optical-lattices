@@ -47,7 +47,9 @@ def superfluid_fraction_current(engine: BilayerGPE, psi: torch.Tensor, axis: int
     return L * L * I / (2.0 * engine.kappa * N * theta)
 
 
-def leggett_bounds(n: torch.Tensor, grid: Grid, axis: int = 0, eps: float = 1e-300):
+def leggett_bounds(
+    n: torch.Tensor, grid: Grid, axis: int = 0, eps: float = 1e-300
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Leggett brackets for superflow along `axis` from the density alone
     (Perez-Cruz, Astrakharchik & Massignan 2025; the 1D identity when d = 1):
 
@@ -194,7 +196,7 @@ def component_fractions(engine: BilayerGPE, psi: torch.Tensor) -> torch.Tensor:
 # -- moire-cell (pocket) bookkeeping ------------------------------------------------
 
 
-def pocket_cells(grid: Grid, L_box: float | None = None):
+def pocket_cells(grid: Grid, L_box: float | None = None) -> list[tuple[str, str, tuple[float, float], torch.Tensor]]:
     """The four moire cells of the sqrt(m^2+n^2) supercell: squares of side
     L/2 centred at (0,0), (L/2,0), (0,L/2), (L/2,L/2) (periodic). They are NOT
     equivalent: the lattices are in

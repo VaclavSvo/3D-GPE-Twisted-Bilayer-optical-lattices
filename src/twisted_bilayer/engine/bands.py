@@ -27,11 +27,16 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.sparse.linalg import LinearOperator, eigsh
 
 from .units import KAPPA
+
+if TYPE_CHECKING:  # annotations only; the functions import these at call time
+    from .grid import Grid
+    from .lattice import MoireGeometry
 
 # -- 1D lattice -----------------------------------------------------------------
 
@@ -59,7 +64,9 @@ def _bloch_1d(V0: float, q: np.ndarray, n_pw: int, kappa: float = KAPPA):
     return E, C, l
 
 
-def bands_1d(V0: float, n_q: int = 64, n_pw: int = 31, n_bands: int = 4, kappa: float = KAPPA):
+def bands_1d(
+    V0: float, n_q: int = 64, n_pw: int = 31, n_bands: int = 4, kappa: float = KAPPA
+) -> tuple[np.ndarray, np.ndarray]:
     """Exact Bloch bands of V0 sin^2(pi x).
     Returns (q (n_q,) in (-pi, pi], E (n_q, n_bands)), lowest bands first."""
     q = bz_grid(n_q)
@@ -93,7 +100,7 @@ def _wannier_coefficients(V0: float, n_q: int, n_pw: int, kappa: float = KAPPA):
 
 def wannier_1d(
     V0: float, n_pw: int = 31, n_x: int = 64, n_sites: int | None = None, n_q: int = 64, kappa: float = KAPPA
-):
+) -> tuple[np.ndarray, np.ndarray]:
     """Maximally localised Wannier function of the lowest band, centred on
     the site at x = 0:
 
@@ -127,7 +134,7 @@ def wannier_1d(
     return x[sl], w[sl]
 
 
-def overlap_1d(V0, d, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+def overlap_1d(V0, d, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA) -> float | np.ndarray:
     """s(d) = int w(x) w(x - d) dx for any real displacement d (scalar or
     array). In the plane-wave basis
 
@@ -151,7 +158,9 @@ def _ho_sigma(V0: float, kappa: float = KAPPA) -> float:
     return math.sqrt(2.0 * kappa / omega)
 
 
-def wannier_coefficients_band(V0: float, band: int = 0, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+def wannier_coefficients_band(
+    V0: float, band: int = 0, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Phase-fixed Bloch coefficients of band `band` (0 = lowest) in the projection
     gauge: <g|psi_q> real and positive, with g the harmonic-oscillator state of
     order `band` of the site well, centred at x = 0 (its Fourier transform is
@@ -183,7 +192,9 @@ def band_centres_1d(V0: float, n_bands: int = 4, n_q: int = 64, n_pw: int = 31, 
     return E.mean(axis=0)
 
 
-def overlap_bands_1d(V0, d, band_a: int = 0, band_b=0, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+def overlap_bands_1d(
+    V0, d, band_a: int = 0, band_b=0, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA
+) -> float | np.ndarray:
     """s_ab(d) = int w_a(x) w_b(x - d) dx between the Wannier functions of bands
     a and b (`wannier_coefficients_band` gauge), for any real d:
 
@@ -214,7 +225,7 @@ def overlap_bands_1d(V0, d, band_a: int = 0, band_b=0, n_q: int = 64, n_pw: int 
     return out[0] if d_arr.ndim else float(out[0].ravel()[0])
 
 
-def band_weight_1d(V0: float, d, band: int, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA):
+def band_weight_1d(V0: float, d, band: int, n_q: int = 64, n_pw: int = 31, kappa: float = KAPPA) -> float | np.ndarray:
     """sum_n s_0b(d + n)^2 over all sites n of the ring: the weight of the lowest-band
     Wannier function displaced by d in band b of the undisplaced lattice. Gauge
     independent (Parseval: (1/n_q) sum_q |sum_l conj(c^0_l(q)) c^b_l(q) e^{-i k_l d}|^2,
@@ -262,7 +273,9 @@ class MoireBands:
     residuals: np.ndarray  # (n_bands,) ||H u - E u||
 
 
-def moire_supercell(V0: float, m: int = 22, n: int = 1, points_per_a: float = 8.0):
+def moire_supercell(
+    V0: float, m: int = 22, n: int = 1, points_per_a: float = 8.0
+) -> tuple[MoireGeometry, Grid, np.ndarray, list[np.ndarray]]:
     """The supercell grid and both lattice potentials exactly as the engine
     builds them: Grid((N, N), (L, L)) with N = geometry.grid_size(points_per_a),
     V = bilayer_potential(grid, V0, geometry). Returns (geometry, grid, V
@@ -289,7 +302,7 @@ def moire_hamiltonian(
     delta: float = 0.0,
     q=(0.0, 0.0),
     kappa: float = KAPPA,
-):
+) -> tuple[LinearOperator, LinearOperator, Grid]:
     """The two-component single-particle Hamiltonian on the supercell as a
     matrix-free scipy LinearOperator on vectors of length 2 N^2 (layout
     (2, N, N) raveled: the engine's (C, *N) without the batch axis),
@@ -385,7 +398,7 @@ def lowest_eigenpairs(
     seed: int = 0,
     maxiter: int = 2000,
     max_rounds: int = 8,
-):
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Lowest k eigenpairs of a Hermitian LinearOperator, safe for
     degenerate spectra (the bilayer's C4 symmetry makes many pairs).
 

@@ -80,7 +80,7 @@ def append_history(root: str, kind: str, row: dict) -> None:
         w.writerow(row)
 
 
-def to_jsonable(obj, max_array: int = MAX_ARRAY):
+def to_jsonable(obj, max_array: int = MAX_ARRAY) -> object:
     """A JSON-serialisable copy: dataclasses and mappings become dicts, numpy and torch arrays lists (or a
     summary above max_array elements), non-finite floats strings, everything else str()."""
     if obj is None or isinstance(obj, (bool, int, str)):

@@ -54,7 +54,9 @@ MODELS = ("npse", "fixed", "3d")
 
 @dataclass
 class Vertical:
-    """The z direction of the 3D solve."""
+    """The z direction of the 3D solve: Nz grid points over z in [-z_extent_lz l_z, +z_extent_lz l_z]
+    (l_z the vertical oscillator length of `omega_z_hz`, in a), and polish_steps, the step budget of the 3D
+    polish (separate from the 2D budget `TrappedSpec.polish_steps`; raise it per row for a slow cloud)."""
 
     Nz: int = 32
     z_extent_lz: float = 5.0  # z box +-z_extent l_z
@@ -152,9 +154,14 @@ def solve_models(
     dtype_2d: str | None = None,
 ) -> dict:
     """The NPSE, fixed-g and 3D ground states of one trapped cloud: the 3D solve in `dtype`, the two
-    quasi-2D solves in `dtype_2d` (default: `dtype`). Returns dict(scan, models={name: dict(n (C, Nx, Ny)
-    column density, mu, E_per_N, residual, steps, seconds, peak_gib, ...)}, width_3d, width_npse (both
-    <z^2> / (l_z^2 / 2)), grid2, grid3)."""
+    quasi-2D solves in `dtype_2d` (default: `dtype`). The NPSE solve starts from the LDA cloud
+    (`trapped.trapped_ground_state`, budget spec.polish_steps); the fixed-g solve and the 3D solve start from
+    the NPSE cloud (budgets spec.polish_steps and vert.polish_steps). spec: the cloud (`trapped.TrappedSpec`;
+    its box is not enlarged here); vert: the z grid and the 3D budget (`Vertical`); scan: a supercell scan to
+    reuse. Units: mu, E_per_N, residual in E_R (mu and E/N of the 3D solve with the vertical zero point
+    omega_z / 2 removed); column densities in atoms per a^2. Returns dict(scan, models={name: dict(n (C, Nx, Ny)
+    column density, mu, E_per_N, residual, steps, stop_reason, seconds, peak_gib, ...)}, width_3d,
+    width_npse (both <z^2> / (l_z^2 / 2)), grid2, grid3)."""
     dtype_2d = dtype if dtype_2d is None else dtype_2d
     spec = replace(_no_enlarge(spec), dtype=str(dtype_2d), vertical="npse")
     g3d, wz, lz = couplings_3d(spec)
@@ -567,7 +574,7 @@ PROBE_TIME_FACTOR = 1.5
 PROBE_MEMORY_FACTOR = 1.15
 
 
-def predicted_seconds(step3: Cost, box: int, Nz: int, cell_points: int, steps_3d=STEPS_3D, steps_2d=STEPS_2D):
+def predicted_seconds(step3: Cost, box: int, Nz: int, cell_points: int, steps_3d=STEPS_3D, steps_2d=STEPS_2D) -> float:
     """Wall time of one `solve_models` call: the 3D polish plus two 2D polishes, each 2D step costing
     about a 3D step of one z plane (the 2D engine does the same work per point)."""
     p3 = points_3d(box, Nz, cell_points)

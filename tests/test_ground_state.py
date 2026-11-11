@@ -241,10 +241,11 @@ def _bumped_residual(eng, bumps):
     eng.residual = residual
 
 
-def test_one_residual_bump_with_falling_energy_is_not_an_overshoot():
-    """complex128: one window whose residual rises while E falls does not restart the polish (the run is
-    the same as without the bump, bit for bit); two rises in a row do (tau is halved: a different run).
-    complex64 keeps the residual-only test: one rise restarts it."""
+def test_residual_rise_with_falling_energy_is_not_an_overshoot():
+    """complex128: windows whose residual rises while E falls by more than its rounding level do not restart
+    the polish, one or several in a row (the run is the one without the rises, bit for bit). Near convergence,
+    where E no longer moves, one rise is let through and a second in a row restarts it (tau is halved: a
+    different run). complex64 keeps the residual-only test: one rise restarts it."""
     from twisted_bilayer.engine.ground_state import precondition_polish
 
     def run(dtype, bumps):
@@ -255,13 +256,43 @@ def test_one_residual_bump_with_falling_energy_is_not_an_overshoot():
         return p, n, info["stop_reason"]
 
     p0, n0, s0 = run(torch.complex128, {})
-    p1, n1, _ = run(torch.complex128, {4: 100.0})  # the descent falls ~10x per window: a 100x bump is a rise
-    assert s0 == "tol" and n1 == n0 and torch.equal(p1, p0)
-    p2, n2, _ = run(torch.complex128, {4: 100.0, 5: 1e4})  # the residual rises twice running
-    assert not (n2 == n0 and torch.equal(p2, p0))
+    assert s0 == "tol"
+    # windows 3 and 4 (calls 4, 5): E still falls by 1e-6 and 1e-8, far above its rounding level (~2e-12)
+    for bumps in ({4: 100.0}, {4: 100.0, 5: 1e4}):
+        p1, n1, _ = run(torch.complex128, bumps)
+        assert n1 == n0 and torch.equal(p1, p0), bumps
+    # windows 8 and 9 (calls 9, 10): E has stopped moving (changes ~1e-14)
+    p3, n3, _ = run(torch.complex128, {9: 100.0})
+    assert n3 == n0 and torch.equal(p3, p0)
+    p4, n4, _ = run(torch.complex128, {9: 100.0, 10: 1e4})
+    assert not (n4 == n0 and torch.equal(p4, p0))
     q0, m0, _ = run(torch.complex64, {})
     q1, m1, _ = run(torch.complex64, {4: 100.0})
     assert not (m1 == m0 and torch.equal(q1, q0))
+
+
+def test_plateau_with_falling_energy_is_not_cut_short():
+    """The pattern of a 12 E_R trapped cloud at fixed g: a residual flat and then rising for several windows while
+    E falls steadily, after which it falls to tol. The polish goes through (stop "tol"); the earlier rules
+    restarted at the second rise and at every rise after it, and ended on tau_floor. Synthetic residual (twelve
+    rising windows), real descent of E (check windows of one step: E still falls by far more than its
+    rounding level)."""
+    from twisted_bilayer.engine.ground_state import precondition_polish
+
+    seq = [1e-4 * 0.8**k for k in range(4)] + [4.1e-5] + [4.1e-5 * 1.01**k for k in range(1, 13)]
+    seq += [seq[-1] * 0.7**k for k in range(1, 200)]  # four falling windows, twelve rising, then to tol
+    eng = _lattice_1d_engine()
+    orig = eng.residual
+    it = iter(seq)
+
+    def residual(psi):
+        orig(psi)
+        return torch.tensor([next(it)], dtype=torch.float64)
+
+    eng.residual = residual
+    info = {}
+    _, r, n = precondition_polish(eng, initial_state(eng, 4.0), 4.0, tol=1e-9, max_steps=4000, check_every=1, info=info)
+    assert info["stop_reason"] == "tol" and float(r.max()) < 1e-9
 
 
 def test_bump_late_in_a_descent_is_not_a_stall():

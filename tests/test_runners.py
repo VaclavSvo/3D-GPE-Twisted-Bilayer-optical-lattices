@@ -1,5 +1,5 @@
-"""runners: every scenario row has a runner, and the trapped runner writes the containment and checks of
-its cloud into summary.json and summary.txt."""
+"""runners: every scenario row has a runner, the trapped runner writes the containment and checks of its cloud
+into summary.json and summary.txt, and a finished run whose cloud is not contained exits with code 3."""
 
 import json
 import math
@@ -13,6 +13,55 @@ from twisted_bilayer.scenarios import SCENARIOS
 def test_every_scenario_kind_has_a_runner():
     missing = {name: row.get("kind") for name, row in SCENARIOS.items() if row.get("kind") not in runners.KINDS}
     assert not missing, missing
+    kinds = {row.get("kind") for row in SCENARIOS.values()}
+    assert {"phase_diagram", "bridge", "tight_binding", "trapped", "xy_convergence"} <= kinds  # the check sees them
+
+
+def test_uncontained_finished_run_exits_3_after_writing_its_files(tmp_path, monkeypatch):
+    """A runner that notes an uncontained cloud makes run_scenario write provenance.json and then raise
+    SystemExit(3); a contained one (or no note) ends normally, and the list is reset for the next run."""
+
+    def fake(name, row):
+        with open(runners.os.path.join(runners._outdir(name), "summary.json"), "w") as f:
+            f.write("{}")
+        runners._note_containment(name, row["contained"])
+
+    monkeypatch.setitem(runners.KINDS, "fake_trapped", fake)
+    out_root = runners._OUT_ROOT
+    try:
+        with pytest.raises(SystemExit) as e:
+            runners.run_scenario("bad", dict(kind="fake_trapped", contained=False), out_root=str(tmp_path))
+        assert e.value.code == runners.EXIT_UNCONTAINED == 3
+        assert (tmp_path / "bad" / "summary.json").exists() and (tmp_path / "bad" / "provenance.json").exists()
+        runners.run_scenario("good", dict(kind="fake_trapped", contained=True), out_root=str(tmp_path))
+        assert (tmp_path / "good" / "provenance.json").exists()
+    finally:
+        runners._OUT_ROOT = out_root
+
+
+@pytest.mark.slow
+def test_trapped_runner_notes_an_uncontained_cloud(tmp_path, monkeypatch):
+    """run_trapped passes checks.contained to _note_containment (the solve itself is the quick row's; slow:
+    a full trapped_quick run, ~30 s on one core)."""
+    from twisted_bilayer.engine import trapped as TR
+
+    real = TR.checks
+
+    def leaky(edge, *args, **kw):
+        return real(1.0, *args, **kw)  # an edge density at the peak: not contained
+
+    monkeypatch.setattr(TR, "checks", leaky)
+    verbose, out_root = runners.VERBOSE, runners._OUT_ROOT
+    runners.VERBOSE = False
+    try:
+        with pytest.raises(SystemExit) as e:
+            runners.run_scenario("tq_leak", dict(SCENARIOS["trapped_quick"]), out_root=str(tmp_path))
+    finally:
+        runners.VERBOSE, runners._OUT_ROOT = verbose, out_root
+    assert e.value.code == 3
+    s = json.loads((tmp_path / "tq_leak" / "summary.json").read_text())
+    assert s["checks"]["contained"] is False and (tmp_path / "tq_leak" / "provenance.json").exists()
+    assert "WARNING" in (tmp_path / "tq_leak" / "summary.txt").read_text()
 
 
 def test_tight_binding_variants_and_the_shipped_row():

@@ -48,6 +48,19 @@ from .units import KAPPA, lattice_units
 
 @dataclass
 class SweepSpec:
+    """One coupling scan (`coupling_scan`) on the commensurate supercell. Lengths in a, energies in E_R.
+
+    V0: lattice depth of each layer (E_R). Omega_R: the couplings scanned (E_R), one batch member each.
+    filling: atoms per a^2, both components together. m, n: the twist, tan(theta_moire / 2) = n / m (22, 1:
+    the experiment's sqrt(485) cell). points_per_a: grid points per a (>= 8 for ground states, >= 16 at
+    V0 >= 12). delta: detuning (E_R). g2d: the 2D coupling (E_R a^2); None derives it from omega_z_hz (Hz)
+    and a_s = 100 a0. vertical: "npse" or "fixed" (the quasi-2D interaction). theta: the phase twist (rad)
+    across the box for the superfluid fraction. tol: residual at which the ground states stop (E_R).
+    dtype_relax, dtype_polish: precisions of the relaxation and of the polish to tol. max_polish_steps: the
+    polish's step budget (twisted solves at large V0 need far more than untwisted ones). blur_sigma: Gaussian
+    blur (a) of the moire contrast. phase_noise, seed: a random start phase (rad) for independent-seed checks.
+    save_fields: keep one field file per Omega_R."""
+
     V0: float = 8.0
     Omega_R: tuple = tuple(np.round(np.linspace(0.0, 1.0, 11), 4))
     filling: float = 1.0  # atoms per a^2 (total, both components)
@@ -186,6 +199,10 @@ def _relax_two_stage(
 
 
 def coupling_scan(spec: SweepSpec, verbose: bool = True, device: torch.device | None = None) -> SweepResult:
+    """The coupling scan of `spec` (see the module docstring for the pipeline), batched over spec.Omega_R on
+    `device` (default: the package's device). Returns a `SweepResult`: columns over Omega_R (E_per_N and mu
+    in E_R, the superfluid fractions fs_xx, fs_yy and their energy and current routes, the Leggett brackets,
+    contrasts, pocket populations, residuals in E_R, converged), the densities (atoms per a^2) and timings."""
     device = DEVICE if device is None else device
     t_start = time.time()
     units = lattice_units(omega_z_hz=spec.omega_z_hz)
@@ -290,8 +307,8 @@ def coupling_scan(spec: SweepSpec, verbose: bool = True, device: torch.device | 
         cols[f"fs_{name}{name}_current"] = to_numpy(fsI)
         # The two routes carry the finite-twist term with slopes b and 2b in theta^2 (E(theta) - E(0) is
         # quartic in theta beyond the f_s term), so 2 f_E - f_C removes it: the theta -> 0 limit to
-        # O(theta^4). Measured 17 Oct on m = 22 at theta = 0.1 / 0.2 / 0.3: slope ratio 2.00-2.04, the
-        # limit to <= 3e-7 (docs: results 9.3.3). The current route is first order in the state error,
+        # O(theta^4). On m = 22 at theta = 0.1 / 0.2 / 0.3: slope ratio 2.00-2.04, the limit to <= 3e-7.
+        # The current route is first order in the state error,
         # so this needs a tight tol (<= 1e-10) in deep lattices.
         cols[f"fs_{name}{name}"] = to_numpy(2.0 * fsE - fsI)
         cols[f"leggett_{name}_lower"] = to_numpy(lo)

@@ -73,16 +73,16 @@ OMEGA_Z_SI = 2 * math.pi * _P.NU_Z_HZ  # pancake trap frequency (1/s)
 L_Z_UM = L_Z * A_UM  # 0.341 um
 
 
-def ms_to_code(t_ms):
+def ms_to_code(t_ms) -> float:
     return t_ms / T_UNIT_MS
 
 
-def talbot_time(period):
+def talbot_time(period) -> float:
     """Talbot time of a field periodic with `period` (hbar=m=1): T_T = d^2/pi."""
     return period**2 / math.pi
 
 
-def g_of_t(t, g2D, omega_z, s0=1.0):
+def g_of_t(t, g2D, omega_z, s0=1.0) -> np.ndarray:
     """The in-plane coupling of a pancake released at t = 0 from a Gaussian of width s0 l_z
     (g2D = g3D / (sqrt(2 pi) l_z), the coupling of the bare oscillator width): the free Gaussian
     widens as sigma(t)^2 = sigma0^2 (1 + (omega_z t / s0^2)^2), so
@@ -94,7 +94,7 @@ def g_of_t(t, g2D, omega_z, s0=1.0):
     return g2D / (s0 * np.sqrt(1.0 + (omega_z * np.asarray(t, float) / (s0 * s0)) ** 2))
 
 
-def g_integral(t, g2D, omega_z, s0=1.0):
+def g_integral(t, g2D, omega_z, s0=1.0) -> float | np.ndarray:
     """int_0^t g(t') dt' of `g_of_t` = g2D s0 asinh(omega_z t / s0^2) / omega_z."""
     t = np.asarray(t, float)
     s0 = float(s0)
@@ -116,7 +116,7 @@ def npse_release_width(n, g2D, omega_z) -> float:
     return float((s * w).sum() / w.sum()) if w.sum() > 0 else 1.0
 
 
-def kinetic_phase_per_step(dt, dx, dy, Nx, Ny):
+def kinetic_phase_per_step(dt, dx, dy, Nx, Ny) -> float:
     """Largest kinetic phase per split-step, 0.5 dt (kx_max^2 + ky_max^2), on the FFT
     grid (Nx, Ny, dx, dy) (kx_max = pi/dx for even Nx; the 2D corner of the grid).
     The split-step NLS is parametrically unstable when this approaches pi."""
@@ -125,13 +125,13 @@ def kinetic_phase_per_step(dt, dx, dy, Nx, Ny):
     return 0.5 * float(dt) * float(kx * kx + ky * ky)
 
 
-def stable_dt(dx, dy, Nx, Ny, phase=MF_PHASE_TARGET, dt_cap=MF_DT_CAP):
+def stable_dt(dx, dy, Nx, Ny, phase=MF_PHASE_TARGET, dt_cap=MF_DT_CAP) -> float:
     """Largest dt <= dt_cap with kinetic phase per step <= `phase` (rad)."""
     p1 = kinetic_phase_per_step(1.0, dx, dy, Nx, Ny)
     return min(float(dt_cap), phase / p1)
 
 
-def lattice_G(which=2, nmax=1, c=C_TW, s=S_TW, diagonals=True):
+def lattice_G(which=2, nmax=1, c=C_TW, s=S_TW, diagonals=True) -> np.ndarray:
     """Reciprocal vectors of lattice 1 or 2 in the symmetric frame.
 
     V2 = V0[sin^2(pi(xc - ys)) + sin^2(pi(xs + yc))] has primitive reciprocal
@@ -153,7 +153,7 @@ def lattice_G(which=2, nmax=1, c=C_TW, s=S_TW, diagonals=True):
     return np.array(out)
 
 
-def square_G(nmax=1, diagonals=True):
+def square_G(nmax=1, diagonals=True) -> np.ndarray:
     """Axis-aligned square-lattice reciprocal vectors 2pi(m, n)."""
     return lattice_G(which=2, nmax=nmax, c=1.0, s=0.0, diagonals=diagonals)
 
@@ -318,25 +318,25 @@ class Envelope:
     dy: float
 
     @property
-    def shape(self):
+    def shape(self) -> tuple[int, int]:
         return tuple(self.phi.shape[-2:])
 
     @property
-    def x(self):
+    def x(self) -> np.ndarray:
         return self.x0 + self.dx * np.arange(self.shape[1])
 
     @property
-    def y(self):
+    def y(self) -> np.ndarray:
         return self.y0 + self.dy * np.arange(self.shape[0])
 
-    def density(self, component=None):
+    def density(self, component=None) -> np.ndarray:
         p = _to_numpy(self.phi)
         d = p.real**2 + p.imag**2
         if component is None:
             return d.sum(0)
         return d[component]
 
-    def norm(self, component=None):
+    def norm(self, component=None) -> float:
         return float(self.density(component).sum() * self.dx * self.dy)
 
 
@@ -350,10 +350,10 @@ class Orders:
     norm_in: float = 0.0  # norm of the demodulated field
     info: dict = field(default_factory=dict)
 
-    def norms(self, component=None):
+    def norms(self, component=None) -> np.ndarray:
         return np.array([e.norm(component) for e in self.envs])
 
-    def weights(self, component=None):
+    def weights(self, component=None) -> np.ndarray:
         """Norm fractions of the orders (empty for no orders); a zero total norm is a ValueError."""
         n = self.norms(component)
         if len(n) and not n.sum() > 0:
@@ -385,7 +385,7 @@ class TOFImage:
 # ----------------------------------------------------------------------------
 # grid helpers
 # ----------------------------------------------------------------------------
-def fourier_resample(psi, dx, factor_or_n):
+def fourier_resample(psi, dx, factor_or_n) -> tuple[np.ndarray, tuple[float, float], float]:
     """Band-limited resampling of a (stack of) 2D field(s) on the same box by
     FFT truncation / zero padding. `factor_or_n` = (Nx_new, Ny_new).
     Returns (psi_new, (dx_new, dy_new), dropped_weight_fraction)."""
@@ -467,7 +467,7 @@ def _support(phi_np, dx, dy, eps_real, eps_q):
 # ----------------------------------------------------------------------------
 # 1. demodulation
 # ----------------------------------------------------------------------------
-def demodulate(psi, dx, G_list, q_cut=np.pi, dx_coarse=0.5, origin=None, filt="disc", t=0.0):
+def demodulate(psi, dx, G_list, q_cut=np.pi, dx_coarse=0.5, origin=None, filt="disc", t=0.0) -> Orders:
     """Split psi into Bloch-order envelopes, psi(r) = sum_G e^{iG.r} phi_G(r).
 
     phi_G = LPF[psi e^{-iG.r}] with the filter |q| < q_cut ('disc', default
@@ -546,7 +546,7 @@ def demodulate(psi, dx, G_list, q_cut=np.pi, dx_coarse=0.5, origin=None, filt="d
     return Orders(envs=envs, t=float(t), dropped=float(dropped), norm_in=norm_in, info=info)
 
 
-def reconstruct_field(orders, dx, Nx, Ny, origin, component=None):
+def reconstruct_field(orders, dx, Nx, Ny, origin, component=None) -> np.ndarray | None:
     """Re-assemble psi(r) = sum_G e^{iG.r} chi_G(r) on a fine grid (testing).
 
     Each envelope is band-limited-interpolated to spacing dx (needs
@@ -651,7 +651,7 @@ def _nls_comoving(phi, dx, dy, t_a, t_b, g2D, omega_z, dphi=0.02, dt_max=0.5, s0
     return B.ifft2(pk), len(hs), diag
 
 
-def spin_rotate_orders(orders, J_perp: float, tau: float):
+def spin_rotate_orders(orders, J_perp: float, tau: float) -> Orders:
     """Every two-component envelope rotated by exp(-i J_perp sigma_x tau):
         phi_1 -> cos(J tau) phi_1 - i sin(J tau) phi_2,   phi_2 -> cos(J tau) phi_2 - i sin(J tau) phi_1,
     the coupling term of `meanfield_stage` integrated exactly. In the tail it commutes with everything else:
@@ -688,7 +688,7 @@ def propagate_orders(
     phase_tol=0.02,
     s0=1.0,
     highk_check="raise",
-):
+) -> Orders:
     """Propagate every envelope from orders.t to t_end (time since release); s0: the release width of
     the mean-field tail's g(t) (`g_of_t`).
 
@@ -823,7 +823,7 @@ def meanfield_stage(
     dt_check="raise",
     highk_frac=0.75,
     s0=1.0,
-):
+) -> MFResult:
     """Nonlinear 2D expansion of the full field for 0 <= t <= t1 (lattice off):
 
         i d_t psi_c = [-1/2 lap + g(t) n] psi_c + J_perp psi_{c'},
@@ -977,7 +977,7 @@ def meanfield_stage(
     return MFResult(res, dx, dy, (x0, y0), float(t1), diag)
 
 
-def released_kinetic_energy(diag, g2D, omega_z):
+def released_kinetic_energy(diag, g2D, omega_z) -> float:
     """-1/2 int_0^t1 g(t) dI/dt dt from a meanfield_stage record (the in-plane
     kinetic energy that the 2D interaction must have released; exact identity
     dT/dt = -1/2 g(t) dI/dt for the 2D GPE with g = g(t))."""
@@ -1005,7 +1005,7 @@ def released_kinetic_energy(diag, g2D, omega_z):
 #                 w_z^2 t^2)/sqrt(2) (27 um at 18 ms: 4.35 um fringes x 0.002, 19 um structure x 0.98).
 
 
-def push_kinematics(s, pulse=T_PULSE, n_t=512):
+def push_kinematics(s, pulse=T_PULSE, n_t=512) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Resonant-pulse push at saturation s: midpoint times t (s), push z(t) (um),
     in-plane diffusion <x^2>(t) (um^2) and the photons scattered per atom."""
     t = (np.arange(n_t) + 0.5) / n_t * pulse
@@ -1028,7 +1028,7 @@ def _radial_eval(fun, f, n_tab=4097):
 
 def coherent_transfer_f(
     f, s=0.0, NA=NA_IMG, wavelength_um=LAMBDA_IMG_UM, pulse=T_PULSE, sigma_z_um=0.0, focus_um=0.0, pupil=True, n_t=512
-):
+) -> np.ndarray:
     """Coherent absorption-imaging transfer H(f) of the density (see the block comment):
     top-hat pupil (f < NA/lambda) x pulse average of [recoil diffusion x cos(pi lambda
     (focus + z_push(t)) f^2)] x depth-of-field exp(-(pi lambda sigma_z f^2)^2/2).
@@ -1062,19 +1062,19 @@ def coherent_transfer_f(
     return H.reshape(f0.shape)
 
 
-def coherent_transfer_k(k, s=0.0, **kw):
+def coherent_transfer_k(k, s=0.0, **kw) -> np.ndarray:
     """coherent_transfer_f with the wavenumber k in code units (rad per a)."""
     return coherent_transfer_f(np.asarray(k, float) / (2 * np.pi * A_UM), s=s, **kw)
 
 
-def sigma_z_tof_um(t_ms, l_z_um=L_Z_UM, omega_z=OMEGA_Z_SI):
+def sigma_z_tof_um(t_ms, l_z_um=L_Z_UM, omega_z=OMEGA_Z_SI) -> float:
     """rms thickness of the released pancake's column density along z after t_ms:
     l_z sqrt(1 + w_z^2 t^2)/sqrt(2) (non-interacting Gaussian expansion)."""
     t = float(t_ms) * 1e-3
     return l_z_um * math.sqrt(1.0 + (omega_z * t) ** 2) / math.sqrt(2.0)
 
 
-def insitu_transfer(period_um, s=0.0, **kw):
+def insitu_transfer(period_um, s=0.0, **kw) -> float | np.ndarray:
     """Coherent in-situ transfer at a spatial period (um) for saturation s of the 50 us pulse
     (~0.97 / 0.91 / 0.63-0.73 at s = 0.01 / 0.03 / 0.1 for 4.35 um). A float, or an array for an
     array of periods."""
@@ -1082,7 +1082,7 @@ def insitu_transfer(period_um, s=0.0, **kw):
     return float(H) if np.ndim(H) == 0 else H
 
 
-def tof_transfer(period_um, t_ms=18.0, s=0.0, **kw):
+def tof_transfer(period_um, t_ms=18.0, s=0.0, **kw) -> float | np.ndarray:
     """Coherent transfer of a TOF image taken along z after t_ms of expansion at a
     spatial period (um): depth of field sigma_z = sigma_z_tof_um(t_ms) x in-focus pupil
     x pulse push (s). 18 ms: 0.002 at 4.35 um, 0.98 at 19 um."""
@@ -1172,7 +1172,7 @@ def image(
     NA=NA_IMG,
     dof=None,
     focus=0.0,
-):
+) -> TOFImage:
     """TOF absorption image n_TOF = sum_G |chi_G|^2 (cross terms neglected), seen through the
     coherent imaging transfer (the block comment above coherent_transfer_f) and binned into square
     pixels of side `pixel` (a), centred at center + (k + offset) * pixel. The transfer: sharp low-pass
@@ -1227,7 +1227,7 @@ def image_density(
     dof=None,
     focus=0.0,
     t=None,
-):
+) -> TOFImage:
     """Same imaging chain for a density given on a grid (e.g. brute force);
     dof=True needs the expansion time t (code units)."""
     dx, dy = _pair(dx)
@@ -1247,7 +1247,7 @@ def image_density(
     )
 
 
-def visibility(im, d_sat, center=(0.0, 0.0), win0=0.25, win1=0.4, directions=("+x", "-x", "+y", "-y")):
+def visibility(im, d_sat, center=(0.0, 0.0), win0=0.25, win1=0.4, directions=("+x", "-x", "+y", "-y")) -> dict:
     """Satellite visibility of the paper,
         V = (P_av - P_min)/(P_av + P_min),  P_av = (P0 + P1)/2,
     along line cuts through the zeroth-order peak towards each first moire
@@ -1338,7 +1338,7 @@ def _disk_mean(im, cx, cy, r, sub=5):
 
 def satellite_contrast(
     im, d_sat, radius=None, center=(0.0, 0.0), step=None, directions=((1, 0), (-1, 0), (0, 1), (0, -1))
-):
+) -> dict:
     """Satellite-local contrast with NON-overlapping disks:
 
         C_sat = (P1 - P_min)/(P1 + P_min),
@@ -1402,7 +1402,7 @@ def satellite_contrast_profile(
     sub=3,
     window=0.3,
     directions=((1, 0), (-1, 0), (0, 1), (0, -1)),
-):
+) -> dict:
     """Fringe-averaged radial-profile version of the satellite-local contrast.
 
     For each satellite direction e the image is averaged over the wedge of polar
@@ -1514,7 +1514,7 @@ def tof_pipeline(
     focus=0.0,
     dt_check="raise",
     s0=1.0,
-):
+) -> dict:
     """meanfield_stage (t <= t1) -> demodulate -> propagate_orders -> image.
     tail='mf' (default: per-order mean-field tail) or 'linear' (not converged at t1 = 1 ms: 5.0 %
     t1-truncation error at R0 = 25 a against 0.15 % with the MF tail, n_bar = 2).

@@ -313,6 +313,7 @@ def _gs():
     return _tf_ground_state(mu=4.0, R=20.0, g=tof.G2D, dx=0.2, L=64.0)
 
 
+@pytest.mark.slow  # ~26 s on one core
 def test_e_meanfield_energy():
     psi0, w, Natom, org, x = _gs()
     g, wz = tof.G2D, tof.OMEGA_Z
@@ -414,7 +415,7 @@ def test_pipeline_end_to_end():
     assert -1 < sc["C_sat"] < 1
 
 
-@pytest.mark.parametrize("g2D", [tof.G2D, 0.0])
+@pytest.mark.parametrize("g2D", [pytest.param(tof.G2D, marks=pytest.mark.slow), 0.0])  # with the stage: ~29 s
 def test_pipeline_keeps_J_perp_on_through_the_tail(g2D):
     """With J_perp != 0 the coupling acts for the whole t_tof (it used to stop at t1): the interaction is SU(2)
     and the kinetic energy the same in both layers, so a cloud released in layer 1 images as cos^2(J t) (layer
@@ -582,6 +583,7 @@ def test_meanfield_dt_gate():
     assert hk0 < 1e-11 and hk1 < 1e-8, (hk0, hk1)
 
 
+@pytest.mark.slow  # ~22 s on one core
 def test_meanfield_auto_dt_converged():
     """dt='auto' (2 rad/step) vs dt/4: fine-grid densities (lattice scale included) agree
     to < 3e-5 of the peak (short stage, strong coupling 5 g2D; measured 1.3e-5, O(dt^2))."""

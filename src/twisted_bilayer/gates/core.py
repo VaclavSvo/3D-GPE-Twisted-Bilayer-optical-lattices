@@ -321,7 +321,7 @@ def new_history() -> dict:
     return dict(t=[], norm=[], E_total=[], N2_over_N=[], highk=[])
 
 
-def tagged(results, tag: str):
+def tagged(results, tag: str) -> list[GateResult]:
     """Prefix every result's name with `tag` (in place) and return the results."""
     for r in results:
         r.name = f"{tag}: {r.name}"
