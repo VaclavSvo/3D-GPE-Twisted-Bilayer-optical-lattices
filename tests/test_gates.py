@@ -204,7 +204,7 @@ def test_unread_anchors_are_marked():
 
     text = inspect.getsource(suite)
     read = {n for n in R.ANCHORS if f'"{n}"' in text or (n.startswith("trapped_N2000_") and "trapped_N2000_" in text)}
-    other = {"E_z0_code", "dressed_band_bottom_J0.2428_ER", "square_lattice_UJ_c_gutzwiller", "square_lattice_UJ_c_qmc"}
+    other = {"E_z0_code", "dressed_band_bottom_J0.2428_ER"}
     assert set(R.UNREAD_BY_GATES) <= set(R.ANCHORS)
     assert not set(R.UNREAD_BY_GATES) & read
     assert set(R.ANCHORS) - read - other == set(R.UNREAD_BY_GATES)

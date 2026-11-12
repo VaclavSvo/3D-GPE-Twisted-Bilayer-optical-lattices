@@ -2,6 +2,17 @@
 
 User-facing changes of the package, newest first. Versions follow [semantic versioning](https://semver.org).
 
+## 0.3.0 (November 2026)
+
+- The lattice models moved to their own package, [Twisted-Bilayer-Lattice-models](https://github.com/VaclavSvo/Twisted-Bilayer-Lattice-models)
+  (`twisted_bilayer_lattice`): `engine.lattice_model`, the whole `manybody` subpackage, the scenario kinds
+  `tight_binding` and `phase_diagram`, their tests, `docs/manybody.md` and the two GPU scripts of the batched
+  eigensolver. The scenario kind `bridge` and `manybody.parameters.occupation_dependent_U` are no longer part of
+  this package. This package is the Gross-Pitaevskii code only; every continuum result of 0.2.0 is unchanged.
+- The showcase example compares the three continuum models; the five-model comparison is in the lattice
+  repository.
+- `parameters` and `engine.units` import their siblings relatively (no change in behaviour).
+
 ## 0.2.0 (November 2026)
 
 The first tagged version: the state of the code before it is split into a continuum (Gross-Pitaevskii) package and a

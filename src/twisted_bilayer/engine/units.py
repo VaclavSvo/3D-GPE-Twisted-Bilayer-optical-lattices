@@ -34,7 +34,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from twisted_bilayer import parameters as _P
+from .. import parameters as _P
 
 HBAR = _P.HBAR_SI  # J s
 H_PLANCK = 2.0 * math.pi * HBAR  # 2 pi hbar (parameters.H_SI differs by 6e-10)

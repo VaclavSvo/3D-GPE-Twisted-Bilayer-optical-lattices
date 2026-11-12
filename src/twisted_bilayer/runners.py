@@ -98,69 +98,6 @@ def run_coupling_scan(name: str, row: dict) -> None:
     print(f"wrote {out}/coupling_scan.{{png,csv,npz,txt}} and run_metadata.json; total {res.timing['total_s']:.1f} s")
 
 
-# ── the bridge: lattice mean field against the continuum GPE ───────────────────
-
-
-def run_bridge(name: str, row: dict) -> None:
-    """The discrete GPE of the two-layer Bose-Hubbard model (variant C, with and without the interband
-    shift) against the continuum GPE on the same supercell at fixed g2d (manybody.bridge): mu, E/N from
-    each model's band bottom, f_s, the AA/AB density ratio, N2/N and the participation ratio over V0 and
-    Omega_R, as a table, a json and a figure of the differences. One gate: mu - E_bottom at V0 = 16,
-    Omega_R = 0 within 3 % (manybody.bridge.GATE_TOL)."""
-    from twisted_bilayer.manybody.bridge import BridgeSpec, bridge, format_bridge, save_bridge, save_bridge_partial
-
-    torch.set_num_threads(min(4, os.cpu_count() or 1))
-    spec = BridgeSpec(**{k: row[k] for k in row if k != "kind"})
-    geo = moire_geometry(spec.m, spec.n)
-    N = geo.grid_size(spec.points_per_a)
-    _section("pre-flight")
-    print(describe_device())
-    print(geo.describe())
-    print(
-        f"continuum: grid {N}x{N} ({N / geo.L_box:.2f} points per a), {len(spec.Omega_R)} couplings x 3 twists per V0, "
-        f"{spec.dtype_relax} / {spec.dtype_polish}; lattice: {2 * (spec.m**2 + spec.n**2)} sites, complex128"
-    )
-    print(f"V0 = {spec.V0}, Omega_R = {spec.Omega_R}, filling {spec.filling}, nu_z = {spec.nu_z_hz:g} Hz")
-    _section("run")
-    out = _outdir(name)
-    res = bridge(spec, verbose=VERBOSE, on_block=lambda partial: save_bridge_partial(partial, out))
-    save_bridge(res, out)
-    _section("result")
-    print(format_bridge(res))
-    print(f"wrote {out}/bridge.{{txt,json,png}}")
-
-
-# ── phase maps: single-site and cluster Gutzwiller ────────────────────────────
-
-
-def run_phase_diagram(name: str, row: dict) -> None:
-    """Phase map over (V0, Omega_R) with single-site or cluster Gutzwiller (manybody.phase_diagram): labels
-    SF / SF-II / I / MI / empty / ?, f_s(theta -> 0), visibilities, P(n_max); maps.npz, labels.png,
-    summary.json, report.txt and phase_diagram_provenance.json in results/<name>/ (resumable: a rerun continues
-    the map). The row names its entry of manybody.phase_diagram.ROWS as "base"; other keys override it, except
-    the run controls "device", "max_hours", "redo_unconverged" and "force_resume"."""
-    from twisted_bilayer.manybody import phase_diagram as PD
-
-    torch.set_num_threads(min(4, os.cpu_count() or 1))
-    ctl = ("kind", "base", "device", "max_hours", "redo_unconverged", "force_resume")
-    spec = dict(PD.ROWS[row.get("base", name)])
-    spec.update({k: v for k, v in row.items() if k not in ctl})
-    out = _outdir(name)
-    _section("run")
-    summary = PD.run_row(
-        name,
-        out,
-        device=row.get("device", "cpu"),
-        max_hours=row.get("max_hours"),
-        row=spec,
-        redo_unconverged=bool(row.get("redo_unconverged", False)),
-        force_resume=bool(row.get("force_resume", False)),
-        provenance_file="phase_diagram_provenance.json",
-    )
-    _section("result")
-    print(PD.format_report(name, spec, PD._load_npz(os.path.join(out, "maps.npz")), summary))
-
-
 # ── thin-z check ───────────────────────────────────────────────────────────────
 
 
@@ -394,143 +331,6 @@ def run_toy1d(name: str, row: dict) -> None:
         for rr in rows:
             f.write(",".join(f"{x}" for x in rr) + "\n")
     print(f"wrote {out}/toy1d.csv")
-
-
-# ── two-layer tight binding ───────────────────────────────────────────
-
-MODEL_C_VARIANTS = {
-    "A": ("one neighbour: S cut at |d| < 1, lattice-1 frame, no interlayer interaction", {}),
-    "B": ("S cut at |d| < 2", {"cutoff": 2.0}),
-    "C": ("S cut at |d| < 2 + interlayer interaction V_ij", {"cutoff": 2.0, "interlayer_interaction": True}),
-    "D": (
-        "C + the interband shift of the site energies (no interband bonds)",
-        {"cutoff": 2.0, "interlayer_interaction": True, "interband": True, "interband_bonds": False},
-    ),
-}
-
-
-def run_tight_binding(name: str, row: dict) -> None:
-    """The two-layer tight-binding model (engine.lattice_model) on the supercell over Omega_R: for each
-    coupling the mean-field (discrete GPE) ground state, E/N and mu (relative to the on-site energy 2 eps_1D), f_s^xx by twist
-    energy and by current, the PR over sites, the AA/AB density ratio, the layer-2 fraction, residuals
-    and the lowest constrained Hessian eigenvalue (> 0: a minimum). Variants:
-      A  the one-neighbour model (S cut at |d| < 1, lattice-1 frame, no interlayer interaction)
-         -- the reference table;
-      B  S cut at |d| < 2 (removes the cusp the |d| = 1 cutoff puts into the k = 0 coupling next to AA);
-      C  B plus the interlayer density-density interaction V_ij (a12 = a11, as in the continuum model);
-      D  C plus the second-order interband shift of the site energies (not in the shipped row).
-    Also the single-particle k = 0 levels against the continuum (bands.moire_bands_q0) at compare_m."""
-    from twisted_bilayer.engine import lattice_model as lm
-
-    torch.set_num_threads(min(4, os.cpu_count() or 1))
-    t_all = time.time()
-    V0, m, n, filling, theta = row["V0"], row["m"], row["n"], row["filling"], row["theta"]
-    g2d, g2d_source = lm.resolve_g2d(row.get("g2d"), row.get("nu_z_hz"))
-    g2d_note = {
-        "explicit": "given by the row",
-        "nu_z": f"from nu_z = {row.get('nu_z_hz')} Hz (lattice_model.g2d_from_nu_z)",
-        "default": "the shipped lattice_model.G2D_DEFAULT",
-    }[g2d_source]
-    J = bands.hopping_1d(V0, 2)
-    U = bands.onsite_U(V0, g2d)
-    geo = lm.supercell_sites(m, n).geometry
-    head = [
-        f"Two-layer tight binding, V0 = {V0} E_R, filling {filling} atoms/a^2 (both layers), "
-        f"g2d = {g2d:.7f} E_R a^2 ({g2d_note})",
-        f"  {geo.describe()}; {2 * (m**2 + n**2)} sites",
-        f"  J1 = {J[0]:.6f}, J2 = {J[1]:.3e}, U = {U:.6f} E_R (U/J1 = {U / J[0]:.2f}); "
-        f"twist theta = {theta} across the box",
-        f"  E/N and mu relative to the on-site energy 2 eps_1D = {lm.onsite_energy(V0):.6f} E_R; "
-        f"f_s by energy (E) and current (I); PR over the sites of both layers;",
-        "  AA/AB = total density in a 1 a disc at the AA points / at the AB points; hess_min > 0: local minimum",
-        "",
-    ]
-    cols = [
-        "Omega_R",
-        "Omega_R/J1",
-        "E/N",
-        "mu",
-        "fs_xx_E",
-        "fs_xx_I",
-        "PR",
-        "AA/AB",
-        "N2/N",
-        "res_0",
-        "res_theta",
-        "hess_min",
-        "time_s",
-    ]
-    fmt = [
-        "{:7.3f}",
-        "{:10.3f}",
-        "{:10.6f}",
-        "{:10.6f}",
-        "{:9.6f}",
-        "{:9.6f}",
-        "{:7.4f}",
-        "{:10.4g}",
-        "{:7.5f}",
-        "{:8.1e}",
-        "{:9.1e}",
-        "{:9.2e}",
-        "{:6.1f}",
-    ]
-    width = [7, 10, 10, 10, 9, 9, 7, 10, 7, 8, 9, 9, 6]
-    lines = list(head)
-    for key in row["variants"]:
-        t0 = time.time()
-        title, kw = MODEL_C_VARIANTS[key]
-        block = [f"Model {key}: {title}", "  " + " ".join(f"{c:>{w}s}" for c, w in zip(cols, width))]
-        for Om in row["Omega_R"]:
-            t1 = time.time()
-            r = lm.superfluid_fraction(V0, Om, m, n, filling, g2d=g2d, theta=theta, **kw)
-            g = r["gs0"]
-            vals = [
-                Om,
-                Om / J[0],
-                g.E_per_N,
-                g.mu,
-                r["fs_energy"],
-                r["fs_current"],
-                g.participation_ratio,
-                g.AA_AB_ratio,
-                g.layer_fractions[1],
-                g.residual,
-                r["gs_theta"].residual,
-                g.hessian_min,
-                time.time() - t1,
-            ]
-            block.append("  " + " ".join(f.format(v) for f, v in zip(fmt, vals)))
-        lines += block + [f"  ({time.time() - t0:.0f} s)", ""]
-        print("\n".join(block), flush=True)
-    out = _outdir(name)
-    lines.append(f"total {time.time() - t_all:.0f} s on CPU ({torch.get_num_threads()} threads)")
-    with open(os.path.join(out, "table.txt"), "w") as fh:
-        fh.write("\n".join(lines) + "\n")
-    cm = row.get("compare_m", 0)
-    if cm:
-        sp = [
-            f"Single-particle k = 0 levels, tight binding vs continuum (moire_bands_q0, 8 pts/a), "
-            f"V0 = {V0}, m = {cm}, n = {n}; energies in E_R",
-            "  TB absolute = TB + on-site energy 2 eps_1D; 'shift' = E_0 - (decoupled band bottom)",
-        ]
-        np.set_printoptions(precision=5, suppress=True, linewidth=160)
-        for cutoff in (1.0, 2.0):
-            for Om in (0.24, 1.0):
-                t0 = time.time()
-                r = lm.compare_with_continuum(V0, Om, cm, n, n_bands=10, cutoff=cutoff)
-                sp += [
-                    f"  Omega_R = {Om}, S cutoff {cutoff:g} ({time.time() - t0:.0f} s)",
-                    f"    spacing TB   {r['spacing_tb']}",
-                    f"    spacing cont {r['spacing_cont']}",
-                    f"    max |spacing difference| {r['spacing_maxdiff']:.2e}; "
-                    f"shift TB {r['shift_tb']:.6f} vs cont {r['shift_cont']:.6f}; "
-                    f"max |absolute difference| {r['abs_maxdiff']:.2e}",
-                ]
-        print("\n".join(sp))
-        with open(os.path.join(out, f"single_particle_m{cm}.txt"), "w") as fh:
-            fh.write("\n".join(sp) + "\n")
-    print(f"wrote {out}/table.txt ({time.time() - t_all:.0f} s total)")
 
 
 # ── Bogoliubov-de Gennes ───────────────────────────────────────────────────────
@@ -1208,9 +1008,6 @@ KINDS = {
     "thin_z": run_thin_z,
     "rabi": run_rabi,
     "toy1d": run_toy1d,
-    "tight_binding": run_tight_binding,
-    "bridge": run_bridge,
-    "phase_diagram": run_phase_diagram,
     "bdg": run_bdg,
     "trapped": run_trapped,
     "gpu_check": run_gpu_check,
@@ -1255,7 +1052,6 @@ def _provenance() -> dict:
 # and `trapped_3d_precision` runs both precisions by design.
 PRECISION_KEYS = {
     "coupling_scan": ("dtype_relax", "dtype_polish"),
-    "bridge": ("dtype_relax", "dtype_polish"),
     "thin_z": ("dtype_relax", "dtype_polish"),
     "rabi": ("dtype",),
     "trapped": ("dtype",),

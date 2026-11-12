@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "twisted-bilayer"
-version = "0.2.0"
+version = "0.3.0"
 description = "Two-component Gross-Pitaevskii simulations of a Bose-Einstein condensate in twisted-bilayer optical lattices, in PyTorch"
 readme = "README.md"
 license = "MIT"

@@ -20,7 +20,6 @@ Thumbs.db
 /docs/*
 !/docs/methods.md
 !/docs/validation.md
-!/docs/manybody.md
 !/docs/figures/
 /docs/figures/*
 !/docs/figures/twisted_bilayer.png

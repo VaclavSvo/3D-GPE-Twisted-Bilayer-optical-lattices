@@ -27,8 +27,9 @@ the moiré satellites. Drawn by [`scripts/readme_figures.py`](scripts/readme_fig
 **What it computes.** Ground states on the exactly periodic moiré supercell (tan(θ/2) = n/m) and of trapped
 clouds; real-time evolution; the superfluid fraction from a phase twist, with Leggett's bounds; moiré
 contrasts as an absorption image shows them; time of flight; Bogoliubov–de Gennes modes. The vertical
-direction runs in full 3D or is folded into 2D by the NPSE. A lattice (Bose–Hubbard) model of the same system
-adds single-site and cluster Gutzwiller phase maps and a bridge to the continuum. Mean field throughout.
+direction runs in full 3D or is folded into 2D by the NPSE. Mean field throughout. The lattice (Bose–Hubbard)
+models of the same system are a separate package,
+[Twisted-Bilayer-Lattice-models](https://github.com/VaclavSvo/Twisted-Bilayer-Lattice-models).
 
 ## Installation
 
@@ -61,7 +62,6 @@ throughout, `--cpu` to stay on the CPU, `--scenarios FILE` for rows of your own)
 | `rabi_quick` | real-time Rabi transfer between the two states inside the lattice | 15 s |
 | `trapped_3d_quick` | a small trapped cloud in full 3D against the NPSE and fixed-g quasi-2D models | 20 s |
 | `bdg` | Bogoliubov–de Gennes modes: sound speed and the spin branch | 1.5 min |
-| `phase_diagram_quick` | a single-site Gutzwiller phase map over V₀ and Ω_R | minutes |
 | `coupling_scan_v4`, `trapped` | the same on the experiment's supercell (θ = 5.2°) | 6 min |
 | `gpu_check`, `gpu_3d_vs_2d`, `gpu_precision` | GPU against CPU; the 3D cloud as large as the GPU holds; complex64 against complex128 | GPU |
 
@@ -93,8 +93,6 @@ against:
   check panels, GPU runs, the 3D reference against the quasi-2D models, the repository layout, limitations,
   references.
 - [`docs/validation.md`](docs/validation.md): every physics gate with its result and reference.
-- [`docs/manybody.md`](docs/manybody.md): the lattice models (Bose–Hubbard parameters, Gutzwiller, phase maps,
-  the bridge to the continuum).
 - [`CHANGELOG.md`](CHANGELOG.md) and the [examples](examples/).
 
 ## How this was built

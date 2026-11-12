@@ -152,76 +152,7 @@ SCENARIOS = {
         tol=1e-10,
         vertical="fixed",
     ),
-    # the two-layer tight-binding (Bose-Hubbard) mean field, variants A/B/C, on the experiment's supercell;
-    # compare_m: single-particle tight binding against the continuum on the m = 4 cell (0: skip).
-    # The interaction: g2d if given, else from nu_z_hz (engine.lattice_model.g2d_from_nu_z), else the shipped
-    # lattice_model.G2D_DEFAULT (both None, as here)
-    "tight_binding": dict(
-        kind="tight_binding",
-        V0=8.0,
-        m=TWIST_M,
-        n=TWIST_N,
-        filling=1.0,
-        g2d=None,
-        nu_z_hz=None,
-        theta=0.3,
-        Omega_R=(0.0, 0.1, 0.24, 0.5, 1.0),
-        variants="ABC",
-        compare_m=4,
-    ),
-    # the bridge (manybody.bridge): the lattice mean field (variant C, with and without the interband shift)
-    # against the continuum GPE at fixed g2d on the same cell; mu, E/N, f_s, AA/AB, N2/N, PR over V0 and Omega_R.
-    # Always complex128 (energy differences of 1e-3 E_R). The m = 4 row takes about a minute on a CPU
-    "bridge_quick": dict(
-        kind="bridge",
-        V0=(8.0, 12.0, 16.0),
-        Omega_R=(0.0, 0.24, 0.6, 1.0),
-        m=4,
-        n=1,
-        filling=1.0,
-        nu_z_hz=NU_Z_HZ,
-        points_per_a=16.0,
-        theta=0.3,
-        tol=1e-8,
-        dtype_relax="complex128",
-        dtype_polish="complex128",
-        cutoff=2.0,
-        frame="layer1",
-        interband_n_bands=6,
-        tb_tol=1e-11,
-    ),
     # ── the experiment's geometry (theta = 5.2 deg) ──
-    # the same on the experiment's supercell (12 continuum ground states x 3 twists at 16 points per a: minutes
-    # on a GPU, hours on 2 CPU cores)
-    "bridge": dict(
-        kind="bridge",
-        V0=(8.0, 12.0, 16.0),
-        Omega_R=(0.0, 0.24, 0.6, 1.0),
-        m=TWIST_M,
-        n=TWIST_N,
-        filling=1.0,
-        nu_z_hz=NU_Z_HZ,
-        points_per_a=16.0,
-        theta=0.3,
-        tol=1e-8,
-        dtype_relax="complex128",
-        dtype_polish="complex128",
-        cutoff=2.0,
-        frame="layer1",
-        interband_n_bands=6,
-        tb_tol=1e-11,
-    ),
-    # phase maps over (V0, Omega_R) with single-site / cluster Gutzwiller (manybody.phase_diagram; the parameters
-    # live in its ROWS, named by "base"). Resumable: a rerun continues results/<name>/maps.npz. The m = 4 rows take
-    # minutes on a CPU and are for speed and plotting only; the m = 22 rows take hours (one process per map)
-    "phase_diagram_quick": dict(kind="phase_diagram", base="phase_diagram_quick"),
-    "phase_diagram_paper_quick": dict(kind="phase_diagram", base="phase_diagram_paper_quick"),
-    "phase_diagram_cluster_quick": dict(kind="phase_diagram", base="phase_diagram_cluster_quick"),
-    "phase_diagram": dict(kind="phase_diagram", base="phase_diagram"),
-    "phase_diagram_noshift": dict(kind="phase_diagram", base="phase_diagram_noshift"),
-    "phase_diagram_paper": dict(kind="phase_diagram", base="phase_diagram_paper"),
-    "phase_diagram_paper_mu095": dict(kind="phase_diagram", base="phase_diagram_paper_mu095"),
-    "phase_diagram_cluster": dict(kind="phase_diagram", base="phase_diagram_cluster"),
     # coupling scan at V0 = 4 E_R on the sqrt(485) supercell, 12 points per a (~6 min on 2 CPU cores)
     "coupling_scan_v4": dict(
         SCAN_DEFAULTS, V0=4.0, filling=1.0, points_per_a=12.0, Omega_R=(0.0, 0.12, 0.24, 0.5, 1.0)

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 
-from twisted_bilayer import config as _config
+from . import config as _config
 
 CONFIG = _config  # the physical inputs (twisted_bilayer.config)
 _C = CONFIG

@@ -1,12 +1,9 @@
-"""Helpers of showcase.ipynb: one trapped cloud of Meng et al.'s twisted bilayer in five models, on the same box.
+"""Helpers of showcase.ipynb: one trapped cloud of Meng et al.'s twisted bilayer in three models, on the same box.
 
 Continuum (twisted_bilayer.engine.trapped3d.solve_models): full 3D GPE, quasi-2D NPSE (lambda = 1), quasi-2D fixed g_2D.
-Lattice (twisted_bilayer.engine.lattice_model): the two-layer Bose-Hubbard model of the same box (variant C: S cut at
-|d'| < 2, the interlayer V_ij, the interband shift's site part) with the same harmonic trap on its sites, solved
-(a) as the discrete GPE (coherent-state mean field) and (b) by single-site Gutzwiller at the same atom number.
 
-Every model ends as two column densities on the continuum's 2D grid (the lattice models through their Wannier
-functions), and every observable comes from the same repository functions (trapped.cloud_numbers_from_density,
+Every model ends as two column densities on the 2D grid, and every observable comes from the same repository
+functions (trapped.cloud_numbers_from_density,
 trapped.insitu_from_density), so the comparison is like for like. Results are cached per (coupling, box) in
 `cache_dir`; a rerun with the same settings only reads them back.
 """
@@ -49,7 +46,7 @@ def find_repo(start: str | pathlib.Path = ".") -> pathlib.Path | None:
 class Settings:
     couplings: tuple = (0.121, 0.150, 0.243)  # keys of scenarios.J_PERP_ER (E_R)
     boxes: tuple = (3, 5)  # odd numbers of sqrt(485) a supercells
-    models: tuple = ("3d", "npse", "fixed", "lattice_gpe", "gutzwiller")
+    models: tuple = ("3d", "npse", "fixed")
     V0: float = 4.0  # E_R
     N_atoms: float = 2000.0
     nu_r_hz: float = 20.0
@@ -61,12 +58,6 @@ class Settings:
     dtype_2d: str = "complex128"
     tol: float = 1e-9  # E_R, residual target of the continuum solves
     s_sat: float = 0.01  # imaging saturation of C_coh
-    gutz_n_max: int = 6
-    gutz_tol: float = 1e-8
-    gutz_match_N: bool = True  # one Newton step in mu so that Gutzwiller holds the same N as the others
-    lattice_box_max: int = 3  # the lattice models run in at most this box and are padded with empty sites beyond it
-    # (a 5 x 5 lattice model needs > 6 GB of RAM for its site tables; the cloud fits the 3 x 3 box, so padding is exact
-    # up to the 3 x 3 box's edge density)
     cache_dir: str = "showcase_results"
 
     def continuum_key(self) -> dict:
@@ -87,29 +78,13 @@ class Settings:
             )
         }
 
-    def lattice_key(self) -> dict:
-        return {
-            k: getattr(self, k)
-            for k in (
-                "V0",
-                "N_atoms",
-                "nu_r_hz",
-                "nu_z_hz",
-                "cell_points",
-                "s_sat",
-                "gutz_n_max",
-                "gutz_tol",
-                "gutz_match_N",
-            )
-        }  # not the box: see run_lattice
-
 
 def _tag(d: dict) -> str:
     return hashlib.sha1(json.dumps(d, sort_keys=True).encode()).hexdigest()[:8]
 
 
 def _paths(S: Settings, kind: str, J_key: float, box: int):
-    key = S.continuum_key() if kind == "cont" else S.lattice_key()
+    key = S.continuum_key()
     stem = f"{kind}_J{J_key:.3f}_box{box}_{_tag(key)}"
     d = pathlib.Path(S.cache_dir)
     d.mkdir(parents=True, exist_ok=True)
@@ -206,191 +181,6 @@ def _continuum_bottom(V0: float) -> float:
     return 2.0 * bands.band_bottom_1d(V0)  # 2D band bottom of one decoupled lattice (3.089723 E_R at 4 E_R)
 
 
-# ----------------------------------------------------------------------------- the lattice models
-def _wannier_table(V0: float):
-    from twisted_bilayer.engine import bands
-
-    x, w = bands.wannier_1d(V0, n_x=64, n_sites=8)
-    return x, w * w
-
-
-def deposit(cell, occupations: np.ndarray, x_grid: np.ndarray, V0: float, radius: float = 3.0) -> np.ndarray:
-    """Site occupations (2, c) of the lattice model -> column densities (2, N, N) [ix, iy] on the continuum grid
-    x_j = (j - N/2) dx, each site carrying its Wannier density w(x')^2 w(y')^2 along its own lattice's axes."""
-    xw, w2 = _wannier_table(V0)
-    N = x_grid.size
-    dx = float(x_grid[1] - x_grid[0])
-    K = int(math.ceil(radius / dx))
-    off = np.arange(-K, K + 1)
-    out = np.zeros((occupations.shape[0], N * N))
-    for layer, ly in enumerate(cell.layers):
-        a = ly.axes[0]  # rows: unit vectors of the two lattice axes (the same for every site)
-        for s in range(0, ly.c, 512):
-            p = ly.positions[s : s + 512]
-            n = occupations[layer, s : s + 512]
-            i0 = np.rint(p / dx).astype(np.int64) + N // 2  # nearest grid index of each site
-            ix = i0[:, 0, None, None] + off[None, :, None]
-            iy = i0[:, 1, None, None] + off[None, None, :]
-            X = (ix - N // 2) * dx - p[:, 0, None, None]
-            Y = (iy - N // 2) * dx - p[:, 1, None, None]
-            u = X * a[0, 0] + Y * a[0, 1]
-            v = X * a[1, 0] + Y * a[1, 1]
-            val = n[:, None, None] * np.interp(u, xw, w2, 0.0, 0.0) * np.interp(v, xw, w2, 0.0, 0.0)
-            flat = (np.mod(ix, N) * N + np.mod(iy, N)).ravel()
-            out[layer] += np.bincount(flat, weights=val.ravel(), minlength=N * N)
-    return out.reshape(-1, N, N)
-
-
-def _lattice_model(S: Settings, J: float, box: int):
-    from twisted_bilayer.engine import lattice_model as lm
-    from twisted_bilayer.engine import units
-
-    cell = lm.supercell_sites(22 * box, box)  # the same box: (m, n) = box x (22, 1), the same twist
-    model = lm.build_model(
-        S.V0,
-        J,
-        22 * box,
-        box,
-        cell=cell,
-        nu_z_hz=S.nu_z_hz,
-        cutoff=2.0,
-        interlayer_interaction=True,
-        interband=True,
-        interband_bonds=False,
-    )
-    w = _spec(S, J, box).omega_r()
-    pos = np.concatenate([ly.positions for ly in cell.layers])
-    model.onsite = model.onsite + 0.5 * units.M_LATTICE * w * w * (pos**2).sum(axis=1)  # the same trap
-    return cell, model
-
-
-def run_lattice(S: Settings, J_key: float, box: int, force: bool = False, verbose: bool = True) -> dict:
-    """Lattice GPE and Gutzwiller for one (coupling, box); cached. Boxes above S.lattice_box_max reuse the solution of
-    that box, padded with empty sites onto the larger grid."""
-    lb = min(box, S.lattice_box_max)
-    if box > lb:
-        fj, fz = _paths(S, "latt", J_key, box)
-        if fj.exists() and fz.exists() and not force:
-            return load(fj, fz)
-        small = run_lattice(S, J_key, lb, force, verbose)
-        x = _grid_x(S, box)
-        off = (box - lb) * S.cell_points // 2
-        n_small = {m: small["fields"][f"n_{m}"] for m in ("lattice_gpe", "gutzwiller")}
-        fields = {"x": x}
-        obs = {}
-        for m, n in n_small.items():
-            big = np.zeros((n.shape[0], x.size, x.size), dtype=np.float32)
-            big[:, off : off + n.shape[1], off : off + n.shape[2]] = n
-            fields[f"n_{m}"] = big
-            obs[m] = _observables(S, big.astype(np.float64), x, box)
-            for k in ("mu", "residual", "seconds", "N_model", "condensate_fraction", "converged"):
-                if k in small["observables"][m]:
-                    obs[m][k] = small["observables"][m][k]
-        meta = {k: v for k, v in small.items() if k not in ("fields", "observables")}
-        meta.update(box=box, lattice_box=lb, observables=_jsonable(obs))
-        np.savez_compressed(fz, **fields)
-        fj.write_text(json.dumps(meta, indent=1, default=float))
-        return load(fj, fz)
-    return _run_lattice_box(S, J_key, box, force, verbose)
-
-
-def _run_lattice_box(S: Settings, J_key: float, box: int, force: bool = False, verbose: bool = True) -> dict:
-    from twisted_bilayer.engine import bands
-    from twisted_bilayer.engine import lattice_model as lm
-    from twisted_bilayer.scenarios import J_PERP_ER
-
-    fj, fz = _paths(S, "latt", J_key, box)
-    if fj.exists() and fz.exists() and not force:
-        return load(fj, fz)
-    J = J_PERP_ER.get(J_key, J_key)  # one of the three readings, or any value in E_R
-    t0 = time.time()
-    cell, model = _lattice_model(S, J, box)
-    if verbose:
-        print(
-            f"  lattice model: {2 * cell.c} sites, U = {model.U:.5f}, J1 = {model.J[0]:.5f} E_R "
-            f"({time.time() - t0:.0f} s)",
-            flush=True,
-        )
-    t1 = time.time()
-    gs = lm.ground_state(S.V0, J, 22 * box, box, filling=S.N_atoms / cell.c, model=model, tol=1e-9)
-    t_gpe = time.time() - t1
-    if verbose:
-        print(f"  lattice GPE: mu = {gs.mu:.6f} E_R, residual {gs.residual:.1e} ({t_gpe:.0f} s)", flush=True)
-    t1 = time.time()
-    gz = lm.gutzwiller(
-        S.V0,
-        J,
-        22 * box,
-        box,
-        mu_over_U=gs.mu / model.U,
-        model=model,
-        phi0=gs.phi.numpy(),
-        n_max=S.gutz_n_max,
-        tol=S.gutz_tol,
-    )
-    if S.gutz_match_N and gz.compressibility > 0:
-        mu1 = gz.mu + (S.N_atoms - gz.n.sum()) / (gz.compressibility * cell.c)
-        gz = lm.gutzwiller(
-            S.V0,
-            J,
-            22 * box,
-            box,
-            mu_over_U=mu1 / model.U,
-            model=model,
-            phi0=gz.phi,
-            n_max=S.gutz_n_max,
-            tol=S.gutz_tol,
-        )
-    t_gz = time.time() - t1
-    if verbose:
-        print(
-            f"  Gutzwiller: N = {gz.n.sum():.1f}, condensate fraction {gz.condensate_fraction:.4f}, "
-            f"converged {gz.converged} ({t_gz:.0f} s)",
-            flush=True,
-        )
-    x = _grid_x(S, box)
-    nG = deposit(cell, gs.density, x, S.V0)
-    nZ = deposit(cell, gz.n, x, S.V0)
-    Jl = bands.hopping_1d(S.V0, 2)
-    Eb = float(-4.0 * Jl.sum())  # tight-binding band bottom (the lattice model's zero is the on-site energy)
-    obs = {"lattice_gpe": _observables(S, nG, x, box), "gutzwiller": _observables(S, nZ, x, box)}
-    obs["lattice_gpe"].update(mu=gs.mu, residual=gs.residual, seconds=t_gpe, N_model=float(gs.density.sum()))
-    obs["gutzwiller"].update(
-        mu=gz.mu,
-        residual=float("nan"),
-        seconds=t_gz,
-        N_model=float(gz.n.sum()),
-        condensate_fraction=gz.condensate_fraction,
-        converged=bool(gz.converged),
-    )
-    meta = dict(
-        kind="lattice",
-        J_key=J_key,
-        J=J,
-        box=box,
-        lattice_box=box,
-        settings=S.lattice_key(),
-        U=model.U,
-        J1=float(model.J[0]),
-        J2=float(model.J[1]),
-        sites=2 * cell.c,
-        E_bottom=Eb,
-        seconds=time.time() - t0,
-        observables=_jsonable(obs),
-    )
-    np.savez_compressed(
-        fz,
-        x=x,
-        n_lattice_gpe=nG.astype(np.float32),
-        n_gutzwiller=nZ.astype(np.float32),
-        occ_gpe=gs.density,
-        occ_gutz=gz.n,
-        cond_gutz=np.abs(gz.phi) ** 2,
-    )
-    fj.write_text(json.dumps(meta, indent=1, default=float))
-    return load(fj, fz)
-
-
 def _grid_x(S: Settings, box: int) -> np.ndarray:
     L = box * math.sqrt(485.0)
     N = box * S.cell_points
@@ -440,10 +230,9 @@ def load(fj, fz) -> dict:
 
 
 def run_all(S: Settings, force: bool = False, verbose: bool = True) -> dict:
-    """{(J_key, box): {"cont": ..., "latt": ...}} for every coupling and box in S."""
+    """{(J_key, box): {"cont": ...}} for every coupling and box in S."""
     out = {}
     want_c = any(m in S.models for m in ("3d", "npse", "fixed"))
-    want_l = any(m in S.models for m in ("lattice_gpe", "gutzwiller"))
     for J_key in S.couplings:
         for box in S.boxes:
             out[(J_key, box)] = {}
@@ -457,13 +246,6 @@ def run_all(S: Settings, force: bool = False, verbose: bool = True) -> dict:
                 out[(J_key, box)]["cont"] = run_continuum(S, J_key, box, force, verbose)
                 if verbose:
                     print(f"  done in {time.time() - t:.0f} s", flush=True)
-            if want_l:
-                t = time.time()
-                if verbose:
-                    print(f"J = {J_key} E_R, {box} x {box}: lattice models", flush=True)
-                out[(J_key, box)]["latt"] = run_lattice(S, J_key, box, force, verbose)
-                if verbose:
-                    print(f"  done in {time.time() - t:.0f} s", flush=True)
     return out
 
 
@@ -471,16 +253,14 @@ NAMES = {
     "3d": "full 3D",
     "npse": "NPSE (2D)",
     "fixed": "fixed g (2D)",
-    "lattice_gpe": "lattice GPE",
-    "gutzwiller": "Gutzwiller",
 }
-COLORS = {"3d": "#2a78d6", "npse": "#eb6834", "fixed": "#1baf7a", "lattice_gpe": "#eda100", "gutzwiller": "#e87ba4"}
+COLORS = {"3d": "#2a78d6", "npse": "#eb6834", "fixed": "#1baf7a"}
 A_UM = 0.395  # lattice constant in um
 
 
 def observables(R: dict, J_key: float, box: int, model: str) -> dict | None:
     r = R.get((J_key, box), {})
-    src = r.get("cont") if model in ("3d", "npse", "fixed") else r.get("latt")
+    src = r.get("cont")
     if src is None or model not in src["observables"]:
         return None
     o = dict(src["observables"][model])
@@ -490,7 +270,7 @@ def observables(R: dict, J_key: float, box: int, model: str) -> dict | None:
 
 def density(R: dict, J_key: float, box: int, model: str):
     r = R.get((J_key, box), {})
-    src = r.get("cont") if model in ("3d", "npse", "fixed") else r.get("latt")
+    src = r.get("cont")
     if src is None or f"n_{model}" not in src["fields"]:
         return None, None
     return src["fields"]["x"], src["fields"][f"n_{model}"]
@@ -524,14 +304,8 @@ def table(
                 for k in keys:
                     v = o.get(k, float("nan"))
                     vals.append(f"{v * A_UM:.2f}" if k == "R_rms" else f"{v:.4f}")
-                src = R[(J_key, box)].get("latt") if m in ("lattice_gpe", "gutzwiller") else None
-                note = (
-                    f" ({src['lattice_box']}×{src['lattice_box']} sites, padded)"
-                    if src and src.get("lattice_box", box) != box
-                    else ""
-                )
                 lines.append(
-                    f"| {J_key:.3f} | {box}×{box} | {NAMES[m]}{note} | "
+                    f"| {J_key:.3f} | {box}×{box} | {NAMES[m]} | "
                     + " | ".join(vals)
                     + f" | {o.get('seconds', float('nan')):.0f} |"
                 )
@@ -662,7 +436,7 @@ def plot_observables(R: dict, S: Settings, box: int, keys=("C_coh", "n_AA", "n_A
         "nbar_centre_cell": "central filling",
     }
     fig, axs = plt.subplots(1, len(keys), figsize=(3.6 * len(keys), 3.6), constrained_layout=True)
-    mk = {"3d": "o", "npse": "s", "fixed": "^", "lattice_gpe": "D", "gutzwiller": "v"}
+    mk = {"3d": "o", "npse": "s", "fixed": "^"}
     for ax, k in zip(np.atleast_1d(axs), keys):
         for i, m in enumerate(S.models):
             xs, ys = [], []

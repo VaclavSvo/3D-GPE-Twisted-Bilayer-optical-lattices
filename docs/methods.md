@@ -2,8 +2,8 @@
 
 How `twisted-bilayer` works and how to use it: the engine, the scenarios, the checks, GPU runs, the 3D
 reference and the quasi-2D models, the repository layout. The [README](../README.md) is the short version;
-[`validation.md`](validation.md) lists every physics gate; [`manybody.md`](manybody.md) describes the lattice
-models (Bose-Hubbard, Gutzwiller, the bridge to the continuum).
+[`validation.md`](validation.md) lists every physics gate. The lattice models (Bose-Hubbard, Gutzwiller) are a
+separate package, [Twisted-Bilayer-Lattice-models](https://github.com/VaclavSvo/Twisted-Bilayer-Lattice-models).
 
 ## What the engine does
 
@@ -27,8 +27,7 @@ models (Bose-Hubbard, Gutzwiller, the bridge to the continuum).
   experiment's angle is n/m = 1/22.
 - **More than one model.** The vertical direction can be folded into 2D by the NPSE, a reduction that is
   checked against the full 3D solution. The package also covers trapped clouds from a local-density start,
-  Bogoliubov–de Gennes modes, a two-layer Bose–Hubbard mean field, and the time-of-flight and coherent
-  absorption-imaging pipeline.
+  Bogoliubov–de Gennes modes, and the time-of-flight and coherent absorption-imaging pipeline.
 - **Physics gates.** 77 gates check the engine against analytic results, exact identities, and numbers
   reproduced by the author's earlier, separately written quasi-2D and 3D solvers. Those solvers are not
   distributed; their values and tolerances are pinned in
@@ -220,28 +219,13 @@ your own file with `--scenarios FILE`. Times are for 2 CPU cores.
 | `trapped_3d_nz_quick` | convergence of that 3D cloud in the vertical resolution (N_z = 8 … 32) | 45 s |
 | `xy_convergence_quick` | in-plane resolution on the small cell: supercell at 6 … 16 points per a, trapped cloud | 1.5 min |
 | `bdg` | Bogoliubov–de Gennes modes: sound speed and the spin branch (always on the CPU) | 1.5 min |
-| `tight_binding` | the two-layer Bose–Hubbard mean field on the experiment's supercell, three variants (always on the CPU) | 1.5 min |
-| `bridge_quick` | the lattice mean field against the continuum GPE on the tan(θ/2) = 1/4 cell, with and without the interband shift | 1 min |
-| `phase_diagram_quick` | single-site Gutzwiller phase map (SF / SF-II / I / MI) over V₀ and Ω_R on the tan(θ/2) = 1/4 cell; for speed and plotting | minutes |
-| `phase_diagram_paper_quick` | the same for the paper's one-layer model | minutes |
-| `phase_diagram_cluster_quick` | the same with interlayer-dimer clusters (cluster Gutzwiller) | ~10 min |
 | `coupling_scan_v4` | coupling scan at V₀ = 4 E_R on the experiment's supercell (θ = 5.2°) | 6 min |
 | `trapped` | a cloud of N = 2000 atoms in a 20 Hz trap on 3 × 3 supercells, and its contrast as imaged | 6 min |
-| `bridge` | the same comparison on the experiment's supercell (12 continuum ground states at 16 points per a) | hours on a CPU, minutes on a GPU |
-| `phase_diagram`, `phase_diagram_noshift` | single-site Gutzwiller phase map on the experiment's supercell, 21 × 13 points, with and without the interband shift | ~2 h on one core per map |
-| `phase_diagram_paper`, `phase_diagram_paper_mu095` | the paper's model on the experiment's supercell, at μ/U = 1 and 0.95 (the reading that reproduces the paper's Fig. S4c) | ~1 h |
-| `phase_diagram_cluster` | interlayer-dimer cluster map on the experiment's supercell, 11 × 7 points | ~2 h |
 | `gpu_check` | the quick scan on the GPU and on the CPU, every number compared; then a production timing | GPU |
 | `gpu_3d_vs_2d` | the trapped cloud in full 3D and in both quasi-2D models, as large as the GPU holds | GPU |
 | `gpu_precision` | the same comparison in complex128 and complex64, sized to take about 10 minutes | GPU, 10 min |
 | `gpu_3d_nz` | the experiment's cloud in 3D at N_z = 16 … 96 over the same z box, against the finest | GPU, ~10 min |
 | `gpu_xy_convergence` | in-plane resolution: supercell (V₀ = 4, 8, 16) at 4 … 24 points per a, trapped cloud at 4 … 16 | GPU, tens of min |
-
-The phase maps also run on their own, with more options (time budget, resume, U correction table):
-`python -m twisted_bilayer.manybody.phase_diagram <row> --out <folder> [--device cuda] [--threads 1]
-[--max-hours H] [--redo-unconverged] [--force-resume]`, where `<row>` is any entry of
-`manybody.phase_diagram.ROWS`. A map is written after every V₀ column and a rerun into the same folder continues
-it; a folder made with another row specification is refused.
 
 ## Exit codes
 
@@ -327,7 +311,7 @@ check that everything works; they do not reproduce the experiment's geometry.
 Install a CUDA build of PyTorch before the package (see Installation). The engine uses the GPU when one is
 visible. To stay on the CPU, pass `--cpu` to `twisted-bilayer run`, or set the environment variable
 `TWISTED_BILAYER_FORCE_CPU=1` (PowerShell: `$env:TWISTED_BILAYER_FORCE_CPU = "1"`). The physics gates run
-on the CPU unless you pass `--device cuda`, and `bdg` and `tight_binding` always run on the CPU.
+on the CPU unless you pass `--device cuda`, and `bdg` always runs on the CPU.
 
 Start with `twisted-bilayer run gpu_check`. It runs the quick scan on both devices and compares every
 number (10⁻⁶ on energies, 10⁻⁴ on superfluid fractions) before it times a production-size cell. On a CUDA
@@ -407,14 +391,7 @@ twisted-bilayer run gpu_3d_vs_2d     # the largest cloud this GPU holds
 src/twisted_bilayer/
   engine/        the solver: physics.py (BilayerGPE), ground_state.py, evolve.py, grid.py, lattice.py,
                  npse.py, observables.py, imaging.py, sweep.py, trapped.py, trapped3d.py, thin_z.py, bdg.py,
-                 bands.py, lattice_model.py, units.py, backend.py
-  manybody/      the lattice model beyond mean field: parameters.py (Bose-Hubbard parameters, the parameter
-                 and sign audits, the occupation-dependent U), paper_model.py (the paper's one-layer model),
-                 bridge.py (the lattice mean field against the continuum GPE), gutzwiller.py (single-site
-                 Gutzwiller with twisted boundaries, batches and several starts), cluster.py (cluster
-                 Gutzwiller), fast_kernels.py (the certified tridiagonal site solver of
-                 `solve_batch(eig="fast")`), observables.py (momentum distribution, visibilities, phase
-                 labels), phase_diagram.py (phase maps over V0 and Omega_R)
+                 bands.py, units.py, backend.py
   tof/           time of flight and absorption imaging
   gates/         physics gates: core.py, references.py (every reference number), suite.py
   config.py      the experiment's physical inputs
@@ -427,15 +404,15 @@ src/twisted_bilayer/
 examples/        runnable examples
 tests/           pytest; CPU only, two threads
 scripts/         readme_figures.py (the README figure), validation_report.py (docs/validation.md from a gate
-                 run), bisect_eigh_batch.py and gpu_column_check.py (the batched eigensolver on a GPU)
-docs/            methods.md (this page), validation.md, manybody.md, figures/
+                 run)
+docs/            methods.md (this page), validation.md, figures/
 check.py         lint + tests in one command (the panels: `twisted-bilayer panel quick | broad`)
 ```
 
 ## Limitations
 
-- Mean field only in the continuum. Quantum depletion is included only through the Bogoliubov modes and,
-  on the lattice, single-site and cluster Gutzwiller; finite temperature is not included.
+- Mean field only. Quantum depletion is included only through the Bogoliubov modes; finite temperature is not
+  included.
 - One s-wave scattering length for all three channels (SU(2)-symmetric interaction), as in the paper.
 - Commensurate twist angles only (tan(θ/2) = n/m). The measured angle 5.21(5)° is represented by 1/22.
 - The shipped 3D scenario (`thin_z_quick`) uses the small tan(θ/2) = 1/4 cell. Full 3D runs on the

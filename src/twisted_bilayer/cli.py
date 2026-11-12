@@ -24,7 +24,7 @@ import os
 import sys
 
 FORCE_CPU = "TWISTED_BILAYER_FORCE_CPU"
-CPU_ONLY_KINDS = ("bdg", "tight_binding")  # validated on the CPU only
+CPU_ONLY_KINDS = ("bdg",)  # validated on the CPU only
 
 
 def _cmd_list(a) -> int:

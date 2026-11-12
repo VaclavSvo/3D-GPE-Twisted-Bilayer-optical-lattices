@@ -2,7 +2,7 @@
 a = 1, E_R = 1, hbar = 1, kinetic operator -kappa d^2/dx^2 with kappa = 1/pi^2.
 
 These are the exact, interaction-free numbers the GPE engine is tested
-against and that feed the two-layer tight-binding model (`lattice_model.py`):
+against (also used by the lattice package):
 
   * 1D lattice V0 sin^2(pi x): Bloch bands by plane-wave diagonalisation,
     the hopping J(d), the maximally localised Wannier function of the lowest
