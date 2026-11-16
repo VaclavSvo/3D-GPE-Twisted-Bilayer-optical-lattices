@@ -2,6 +2,11 @@
 
 User-facing changes of the package, newest first. Versions follow [semantic versioning](https://semver.org).
 
+## Unreleased
+
+- The showcase notebook runs with `QUICK = True`: in 0.2.0 and 0.3.0 it stopped with `UncontainedCloud`; the quick
+  cloud is now trapped at 120 Hz instead of 80 Hz and fits its one-supercell box.
+
 ## 0.3.0 (November 2026)
 
 - The lattice models moved to their own package, [Twisted-Bilayer-Lattice-models](https://github.com/VaclavSvo/Twisted-Bilayer-Lattice-models)
@@ -12,11 +17,16 @@ User-facing changes of the package, newest first. Versions follow [semantic vers
 - The showcase example compares the three continuum models; the five-model comparison is in the lattice
   repository.
 - `parameters` and `engine.units` import their siblings relatively (no change in behaviour).
+- The two reference values of the square-lattice Mott transition (`square_lattice_UJ_c_gutzwiller`,
+  `square_lattice_UJ_c_qmc`) moved from `gates/references.py` to `twisted_bilayer_lattice.references`.
 
 ## 0.2.0 (November 2026)
 
 The first tagged version: the state of the code before it is split into a continuum (Gross-Pitaevskii) package and a
 lattice-model package.
+
+The tag `v0.2.0` of this repository does not contain `manybody/bridge.py` and its test, so `twisted_bilayer.manybody`
+cannot be imported at that tag; the lattice models of 0.2.0 run from the lattice repository (0.3.0).
 
 ### Continuum engine
 
